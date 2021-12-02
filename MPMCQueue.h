@@ -1,3 +1,5 @@
+/** TODO: docs */
+
 #ifndef MPMCQUEUE_H
 #define MPMCQUEUE_H
 
@@ -38,7 +40,7 @@ class FNoncopyable
      *  @ref <FileName> UnrealTemplate.h
      */
     
-    protected:
+protected:
     // ensure the class cannot be constructed directly
     FNoncopyable() {}
     // the class should not be used in a polymorphic manner
@@ -51,10 +53,10 @@ private:
 #define SEQUENCE_ERROR_VALUE -2
 
 template <typename T>
-class MPMC_ALIGNMENT TSequentialContainer
+class MPMC_ALIGNMENT TSequentialContainer : public FNoncopyable
 {
 public:
-    explicit TSequentialContainer()
+    TSequentialContainer()
     {
         static_assert(
             std::is_copy_constructible_v<T>	    ||
@@ -63,6 +65,12 @@ public:
             std::is_move_constructible_v<T>,
             "Can't use non-copyable, non-assignable, non-movable, or non-constructible type!"
         );
+    }
+
+    explicit TSequentialContainer(const T& InitialValue)
+    {
+        TSequentialContainer();
+        Data.store(InitialValue, std::memory_order_seq_cst);
     }
 
     FORCEINLINE T Get() const
@@ -129,12 +137,18 @@ private:
     using FElementType = T;
     
 public:
-    explicit TMPMCQueue()
+    TMPMCQueue()
     {
         RingBuffer = MallocZeroed();
         
         ConsumerCursor.SetVolatile(0);
         ProducerCursor.SetVolatile(0);
+    }
+
+    ~TMPMCQueue()
+    {
+        free(RingBuffer);
+        RingBuffer = nullptr;
     }
     
     bool Enqueue(const FElementType& NewElement)
@@ -155,6 +169,11 @@ public:
         {
             ClaimedIndex = ProducerCursor.Get();
             NewIndex = ClaimedIndex + 1;
+        }
+
+        if(RingBuffer == nullptr)
+        {
+            return false;
         }
         
         /** Update the index on the ring buffer with the new element */
@@ -182,6 +201,11 @@ public:
             NewIndex = ClaimedIndex + 1;
         }
 
+        if(RingBuffer == nullptr)
+        {
+            return false;
+        }
+        
         /** Store the claimed element from the ring buffer in the Output var */
         Output = RingBuffer[CalculateIndex(ClaimedIndex)];
         
@@ -200,7 +224,7 @@ private:
     }
 
     /** Contiguous memory allocation. All elements initialised to zero. */
-    FORCEINLINE FElementType* MallocZeroed()
+    FORCEINLINE FElementType* MallocZeroed() const
     {
         return (FElementType*)calloc(TQueueSize, sizeof(FElementType));
     }
