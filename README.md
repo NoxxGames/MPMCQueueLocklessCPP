@@ -1,11 +1,37 @@
-# C++ MPMCQueue
-A simple Multi-Producer, Multi-Consumer Queue Type. Written in Cpp.
+# C++ Lockless MP/MC Queue
+A simple Multi-Producer, Multi-Consumer Queue Type. Written in Cpp using
+just atomics with memory barriers to keep everything ordered appropriately.
 
-Repo is new as of 02-December 2021, will have documentation coming when I get the time.
+Inspiration is taken from the LMAX Disruptor. If you're unfamiliar with lockless
+programming and/or the usage of atomics with memory barriers, then the Disruptor
+is a great place to start learning.
+
+## How it Works
+
+#### Bounded Ring Buffer
+The queue uses a bounded ring buffer to store the data. In order to avoid the use
+of the modulo operator for calculating the index, the queue must have a size which is equal to a power of two.
+This allows us to use a bitmask instead, which is more efficient.
+#### Two Cursors
+A "Producer" curosr, and a "Consumer" cursor are used to indicate to the next incoming
+producer/consumer which index on the ring buffer they will be accessing. When a producer/consumer is attempting access,
+they first increment their respective cursor, then access the buffer. By doing the incrementation first then they will be effectively
+claiming that index, ensuring that only they are accessing that particular index on the buffer. This way each index in the buffer is guarded against multiple access attempts at the same time.
+Since multiple accessors may try  to increment the cursor at the same time, they first
+enter a busy spin and via a CAS operation they verify that they were
+successful in incrementing the cursor, and not someone else.
+#### TSequentialContainer Type
+The queue relies on a Sequential Container which uses memory barriers to synchronize
+access to an atomic variable of template type "T".
+Both of the cursors that the buffer uses are of type FSequentialInteger, which derives from the 
+TSequentialContainer class. This is the type that all access to the ring buffer is protected through.
+
 
 ## Usage
 First create a new queue as follows:
 ```c++
+#include "MPMCQueue.h"
+
 TMPMCQueue<int> MyQueue;
 // Or with a manually specified size (default is 1024),
 // size is automatically rounded up to the nearest power of two!!!
