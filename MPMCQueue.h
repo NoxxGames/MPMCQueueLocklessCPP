@@ -130,16 +130,17 @@ public:
     }
 };
 
-template <typename T, uint64 TQueueSize = 1024>
+template <typename T>
 class TMPMCQueue final : public FNoncopyable
 {
 private:
     using FElementType = T;
     
 public:
-    TMPMCQueue()
+    TMPMCQueue(const uint64 QueueSize = 1024)
     {
-        RingBuffer = MallocZeroed();
+        IndexMask = QueueSize - 1;
+        RingBuffer = MallocZeroed(QueueSize);
         
         ConsumerCursor.SetVolatile(0);
         ProducerCursor.SetVolatile(0);
@@ -224,14 +225,14 @@ private:
     }
 
     /** Contiguous memory allocation. All elements initialised to zero. */
-    FORCEINLINE FElementType* MallocZeroed() const
+    FORCEINLINE FElementType* MallocZeroed(const uint64 AllocationSize) const
     {
-        return (FElementType*)calloc(TQueueSize, sizeof(FElementType));
+        return (FElementType*)calloc(AllocationSize, sizeof(FElementType));
     }
     
 private:
     MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
-    alignas(alignof(const volatile int64) * 2) const volatile int64 IndexMask = TQueueSize - 1; // not a clue TODO:
+    alignas(alignof(volatile int64) * 2) volatile int64 IndexMask; // not a clue TODO:
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
     MPMC_ALIGNMENT FElementType*                                RingBuffer;
     MPMC_PADDING PadToAvoidContention2[PLATFORM_CACHE_LINE_SIZE] = { };
