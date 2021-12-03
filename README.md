@@ -7,6 +7,9 @@ Repo is new as of 02-December 2021, will have documentation coming when I get th
 First create a new queue as follows:
 ```c++
 TMPMCQueue<int> MyQueue;
+// Or with a manually specified size (default is 1024),
+// size is automatically rounded up to the nearest power of two!!!
+TMPMCQueue<int, 2048> MyQueue;
 ```
 Then to add a new element:
 ```c++
