@@ -95,7 +95,7 @@ public:
 
     FORCEINLINE bool CompareAndSet(T& Expected, const T& NewValue)
     {
-        return Data.compare_exchange_strong(Expected, NewValue,
+        return Data.compare_exchange_weak(Expected, NewValue,
             std::memory_order_release, std::memory_order_relaxed);
     }
     
@@ -130,17 +130,17 @@ public:
     }
 };
 
-template <typename T>
+template <typename T, uint64 TQueueSize>
 class TMPMCQueue final : public FNoncopyable
 {
 private:
     using FElementType = T;
     
 public:
-    TMPMCQueue(const uint64 QueueSize = 1024)
+    TMPMCQueue()
     {
-        IndexMask = QueueSize - 1;
-        RingBuffer = MallocZeroed(QueueSize);
+        IndexMask = TQueueSize - 1;
+        RingBuffer = MallocZeroed(TQueueSize);
         
         ConsumerCursor.SetVolatile(0);
         ProducerCursor.SetVolatile(0);
