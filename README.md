@@ -98,3 +98,10 @@ int main()
     return 0;
 }
 ```
+
+## TODO
+
+Presently there is no solution to the ABA problem in the queue. Mainly because I haven't had time yet, but
+my current line of thinking is to do something similar to the LMAX Disruptor. Where the amount of producers, and
+the amount of consumers is tracked. This allows for new producers & consumers to coordinate with each other
+as they obtain and release access to the two cursors, making sure they don't step over each other as per the ABA problem.
