@@ -1,4 +1,7 @@
-/** TODO: docs */
+// SPDX-License-Identifier: GPL-2.0-or-later
+/** Lockless Multi-Producer Multi-Consumer Queue Type.
+ * Author: Primrose Taylor
+ */
 
 #ifndef MPMCQUEUE_H
 #define MPMCQUEUE_H
@@ -130,6 +133,48 @@ public:
     }
 };
 
+/*
+template<uint64 TReserveSize>
+class MPMC_ALIGNMENT FBarrierBase
+{
+public:
+    FBarrierBase()
+    {
+        ListOfActiveSequences.reserve(TReserveSize);
+    }
+
+    bool AddNewActiveSequence(const int64 NewSequenceValue)
+    {
+        ListOfActiveSequences.emplace_back(NewSequenceValue);
+        return true;
+    }
+    
+    void GetAllActiveSequences(std::vector<int64>& Output)
+    {
+        for(int64 i = 0; i < ListOfActiveSequences.size(); i++)
+        {
+            Output.emplace_back(ListOfActiveSequences[i]);  
+        }
+    }
+    
+protected:
+    MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_ALIGNMENT std::vector<int64> ListOfActiveSequences;
+    MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+};
+
+template<uint64 TReserveSize>
+class MPMC_ALIGNMENT FConsumerBarrier : FBarrierBase<TReserveSize>
+{
+public:
+    FConsumerBarrier()
+        : FBarrierBase()
+    {
+        
+    }
+};
+*/
+
 template <typename T, uint64 TQueueSize>
 class TMPMCQueue final : public FNoncopyable
 {
@@ -163,14 +208,7 @@ public:
             return false;
         }
         
-        int64 ClaimedIndex = CurrentProducerCursor;
-        int64 NewIndex = ClaimedIndex + 1;
-        
-        while(!ProducerCursor.CompareAndSet(ClaimedIndex, NewIndex)) // Spin wait for cursor to update
-        {
-            ClaimedIndex = ProducerCursor.Get();
-            NewIndex = ClaimedIndex + 1;
-        }
+        const int64 ClaimedIndex = ProducerCursor.IncrementAndGetOldValue();
 
         if(RingBuffer == nullptr)
         {
@@ -193,14 +231,7 @@ public:
             return false;
         }
 
-        int64 ClaimedIndex = CurrentConsumerCursor;
-        int64 NewIndex = ClaimedIndex + 1;
-
-        while(!ConsumerCursor.CompareAndSet(ClaimedIndex, NewIndex)) // Spin wait for cursor to update
-        {
-            ClaimedIndex = ConsumerCursor.Get();
-            NewIndex = ClaimedIndex + 1;
-        }
+        const int64 ClaimedIndex = ConsumerCursor.IncrementAndGetOldValue();
 
         if(RingBuffer == nullptr)
         {
