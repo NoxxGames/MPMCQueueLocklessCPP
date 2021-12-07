@@ -57,16 +57,19 @@ Adjust the TIMES_TO_CYCLE macro to make the benchmark run for longer.
 #include <thread>
 
 /** Define how many times to Produce/Consume an element. */
-#define TIMES_TO_CYCLE 1000
+#define TIMES_TO_CYCLE 100000000
 
-std::atomic<bool> ProducerFinished = {false};
-std::atomic<bool> ConsumerFinished = {false};
+std::atomic<bool> ProducerFinished1 = {false};
+std::atomic<bool> ConsumerFinished1 = {false};
+
+std::atomic<bool> ProducerFinished2 = {false};
+std::atomic<bool> ConsumerFinished2 = {false};
 
 int main()
 {
-    TMPMCQueue<int> MyQueue;
+    TMPMCQueue<int, 4194304> MyQueue;
 
-    /** Producer Thread */
+    /** Producer 1 Thread */
     std::thread([&]()
     {
         const int NumberToAddLoads = 100;
@@ -75,10 +78,22 @@ int main()
             MyQueue.Enqueue(NumberToAddLoads);
         }
 
-        ProducerFinished.store(true);
+        ProducerFinished1.store(true);
     }).detach();
 
-    /** Consumer Thread */
+    /** Producer 2 Thread */
+    std::thread([&]()
+    {
+        const int NumberToAddLoads = 100;
+        for(int i = 0; i < TIMES_TO_CYCLE; i++)
+        {
+            MyQueue.Enqueue(NumberToAddLoads);
+        }
+
+        ProducerFinished2.store(true);
+    }).detach();
+
+    /** Consumer 1 Thread */
     std::thread([&]()
     {
         int32 NumberToHoldLoads = 0;
@@ -86,13 +101,28 @@ int main()
         {
             MyQueue.Dequeue(NumberToHoldLoads);
         }
-        ConsumerFinished.store(true);
+        ConsumerFinished1.store(true);
     }).detach();
 
-    /** Spin wait until the two threads are complete */
-    while(!ProducerFinished.load(std::memory_order_relaxed) ||
-        !ConsumerFinished.load(std::memory_order_relaxed))
-    { }
+    /** Consumer 2 Thread */
+    std::thread([&]()
+    {
+        int32 NumberToHoldLoads = 0;
+        for(int i = 0; i < TIMES_TO_CYCLE; i++)
+        {
+            MyQueue.Dequeue(NumberToHoldLoads);
+        }
+        ConsumerFinished2.store(true);
+    }).detach();
+
+    /** Spin yield until the four threads are complete */
+    while(!ProducerFinished1.load(std::memory_order_relaxed) ||
+        !ConsumerFinished1.load(std::memory_order_relaxed) ||
+        !ProducerFinished2.load(std::memory_order_relaxed) ||
+        !ConsumerFinished2.load(std::memory_order_relaxed))
+    {
+        std::this_thread::yield();
+    }
     
     system("pause");
     return 0;
@@ -101,7 +131,7 @@ int main()
 
 ## TODO
 
-Presently there is no solution to the ABA problem in the queue. Mainly because I haven't had time yet, but
+Presently there is no good solution to the ABA problem in the queue. Mainly because I haven't had time yet, but
 my current line of thinking is to do something similar to the LMAX Disruptor. Where the amount of producers, and
 the amount of consumers is tracked. This allows for new producers & consumers to coordinate with each other
 as they obtain and release access to the two cursors, making sure they don't step over each other as per the ABA problem.
