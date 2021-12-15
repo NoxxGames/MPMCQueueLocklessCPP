@@ -12,6 +12,8 @@
 #include <atomic>
 #include <vector>
 
+#include <new>
+
 typedef signed char        int8;
 typedef short              int16;
 typedef int                int32;
@@ -32,6 +34,65 @@ typedef unsigned long long uint64;
 #else
 #define FORCEINLINE inline
 #endif
+
+#define TARRAY_INITIAL_VALUE -1
+
+class UMemoryStatics
+{
+public:
+    /** Contiguous memory allocation. All elements initialised to zero. */
+    template<typename T>
+    static FORCEINLINE T* Malloc(const uint64 AllocationSize)
+    {
+        return (T*)malloc(sizeof(T) * AllocationSize);
+    }
+};
+
+template<typename T, int64 TReserveSize>
+class MPMC_ALIGNMENT TArray
+{
+public:
+    TArray()
+    {
+        Array = UMemoryStatics::Malloc<T>(TReserveSize);
+        // Init all elements
+        for(int i = 0; i < TReserveSize; ++i)
+        {
+            Array->emplace_back(TARRAY_INITIAL_VALUE);
+        }
+    }
+
+    ~TArray()
+    {
+        // Dealloc the vector
+        delete Array;
+    }
+
+    void AddNew()
+    {
+        
+    }
+
+    void RemoveByIndex(const uint64 Index)
+    {
+        
+    }
+
+    void GetElement(T& Output, const uint64 Index)
+    {
+        Output = Array[Index];
+    }
+    
+    T GetElement(const uint64 Index)
+    {
+        return Array[Index];
+    }
+    
+protected:
+    MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_ALIGNMENT T* Array;
+    MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+};
 
 /**
  * utility template for a class that should not be copyable.
@@ -104,7 +165,7 @@ public:
     
 protected:
     MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
-    std::atomic<T> Data;
+    MPMC_ALIGNMENT std::atomic<T> Data;
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
@@ -133,7 +194,20 @@ public:
     }
 };
 
-/*
+class MPMC_ALIGNMENT FAccessToken
+{
+public:
+    FAccessToken(const int64 InitialValue)
+    {
+        TokenValue.SetVolatile(InitialValue);
+    }
+    
+protected:
+    MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_ALIGNMENT FSequentialInteger TokenValue;
+    MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+};
+
 template<uint64 TReserveSize>
 class MPMC_ALIGNMENT FBarrierBase
 {
@@ -161,6 +235,7 @@ protected:
     MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
     MPMC_ALIGNMENT std::vector<int64> ListOfActiveSequences;
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+
 };
 
 template<uint64 TReserveSize>
@@ -172,20 +247,75 @@ public:
     {
         
     }
+
+protected:
+    MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_ALIGNMENT FSequentialInteger Current;
+    MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
 };
-*/
 
 template <typename T, uint64 TQueueSize>
 class TMPMCQueue final : public FNoncopyable
 {
 private:
     using FElementType = T;
+
+    /**
+     * TODO: doc
+     */
+    class FRingBufferNode
+    {
+    public:
+        FRingBufferNode()
+        {
+            CurrentAccessTag.SetVolatile(0);
+        }
+
+        FORCEINLINE void Init()
+        {
+            FRingBufferNode();
+        }
+
+        FORCEINLINE void SetNodeData(const FElementType& NewData)
+        {
+            Data.Set(NewData);
+        }
+        
+        FORCEINLINE void GetNodeData(FElementType& Output)
+        {
+            Output = Data.Get();
+        }
+        
+        FORCEINLINE FElementType GetNodeData()
+        {
+            return Data.Get();
+        }
+
+        FORCEINLINE int64 CheckCurrentAccessTag()
+        {
+            return CurrentAccessTag.Get();
+        }
+        
+        FORCEINLINE int64 GetThenIncrementCurrentAccessTag()
+        {
+            return CurrentAccessTag.IncrementAndGetOldValue();
+        }
+        
+    private:
+        MPMC_ALIGNMENT TSequentialContainer<FElementType>   Data;
+        MPMC_ALIGNMENT FSequentialInteger                   CurrentAccessTag;
+    };
     
 public:
     TMPMCQueue()
     {
         IndexMask = TQueueSize - 1;
-        RingBuffer = MallocZeroed(TQueueSize);
+
+        RingBuffer = UMemoryStatics::Malloc<FRingBufferNode>(TQueueSize);
+        for(int64 i = 0; i < TQueueSize; ++i)
+        {
+            RingBuffer[i].Init();
+        }
         
         ConsumerCursor.SetVolatile(0);
         ProducerCursor.SetVolatile(0);
@@ -193,6 +323,9 @@ public:
 
     ~TMPMCQueue()
     {
+        if(RingBuffer == nullptr)
+            return;
+        
         free(RingBuffer);
         RingBuffer = nullptr;
     }
@@ -216,7 +349,7 @@ public:
         }
         
         /** Update the index on the ring buffer with the new element */
-        RingBuffer[CalculateIndex(ClaimedIndex)] = NewElement;
+        RingBuffer[CalculateIndex(ClaimedIndex)].SetNodeData(NewElement);
         
         return true;
     }
@@ -239,7 +372,7 @@ public:
         }
         
         /** Store the claimed element from the ring buffer in the Output var */
-        Output = RingBuffer[CalculateIndex(ClaimedIndex)];
+        Output = RingBuffer[CalculateIndex(ClaimedIndex)].GetNodeData();
         
         return true;
     }
@@ -254,18 +387,14 @@ private:
     {
         return IndexValue & GetIndexMask();
     }
+    
 
-    /** Contiguous memory allocation. All elements initialised to zero. */
-    FORCEINLINE FElementType* MallocZeroed(const uint64 AllocationSize) const
-    {
-        return (FElementType*)calloc(AllocationSize, sizeof(FElementType));
-    }
     
 private:
     MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
-    alignas(alignof(volatile int64) * 2) volatile int64 IndexMask; // not a clue TODO:
+    alignas(alignof(volatile int64) * 2) volatile int64         IndexMask; // not a clue TODO:
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
-    MPMC_ALIGNMENT FElementType*                                RingBuffer;
+    FRingBufferNode*                              RingBuffer;
     MPMC_PADDING PadToAvoidContention2[PLATFORM_CACHE_LINE_SIZE] = { };
     MPMC_ALIGNMENT FSequentialInteger                           ConsumerCursor;
     MPMC_PADDING PadToAvoidContention3[PLATFORM_CACHE_LINE_SIZE] = { };
