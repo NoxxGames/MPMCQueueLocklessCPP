@@ -42,9 +42,9 @@ class UMemoryStatics
 public:
     /** Contiguous memory allocation. All elements initialised to zero. */
     template<typename T>
-    static FORCEINLINE T* Malloc(const uint64 AllocationSize)
+    static FORCEINLINE T* Calloc(const uint64 AllocationSize)
     {
-        return (T*)malloc(sizeof(T) * AllocationSize);
+        return (T*)calloc(AllocationSize, sizeof(T));
     }
 };
 
@@ -54,7 +54,7 @@ class MPMC_ALIGNMENT TArray
 public:
     TArray()
     {
-        Array = UMemoryStatics::Malloc<T>(TReserveSize);
+        Array = UMemoryStatics::Calloc<T>(TReserveSize);
         // Init all elements
         for(int i = 0; i < TReserveSize; ++i)
         {
@@ -172,7 +172,7 @@ protected:
 class MPMC_ALIGNMENT FSequentialInteger : public TSequentialContainer<int64>
 {
 public:
-    explicit FSequentialInteger(const int64 InitialValue = 0)
+    FSequentialInteger(const int64 InitialValue = 0)
         : TSequentialContainer()
     {
         Data.store(InitialValue, std::memory_order_relaxed);
@@ -192,20 +192,6 @@ public:
     {
         return AddAndGetOldValue(1);
     }
-};
-
-class MPMC_ALIGNMENT FAccessToken
-{
-public:
-    FAccessToken(const int64 InitialValue)
-    {
-        TokenValue.SetVolatile(InitialValue);
-    }
-    
-protected:
-    MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
-    MPMC_ALIGNMENT FSequentialInteger TokenValue;
-    MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
 template<uint64 TReserveSize>
@@ -254,68 +240,26 @@ protected:
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
+enum class EMPMCQueueErrorStatus : uint8
+{
+    TRANSACTION_SUCCESS,
+    BUFFER_FULL,
+    BUFFER_EMPTY,
+    BUFFER_NOT_INITIALIZED
+};
+
 template <typename T, uint64 TQueueSize>
 class TMPMCQueue final : public FNoncopyable
 {
 private:
     using FElementType = T;
 
-    /**
-     * TODO: doc
-     */
-    class FRingBufferNode
-    {
-    public:
-        FRingBufferNode()
-        {
-            CurrentAccessTag.SetVolatile(0);
-        }
-
-        FORCEINLINE void Init()
-        {
-            FRingBufferNode();
-        }
-
-        FORCEINLINE void SetNodeData(const FElementType& NewData)
-        {
-            Data.Set(NewData);
-        }
-        
-        FORCEINLINE void GetNodeData(FElementType& Output)
-        {
-            Output = Data.Get();
-        }
-        
-        FORCEINLINE FElementType GetNodeData()
-        {
-            return Data.Get();
-        }
-
-        FORCEINLINE int64 CheckCurrentAccessTag()
-        {
-            return CurrentAccessTag.Get();
-        }
-        
-        FORCEINLINE int64 GetThenIncrementCurrentAccessTag()
-        {
-            return CurrentAccessTag.IncrementAndGetOldValue();
-        }
-        
-    private:
-        MPMC_ALIGNMENT TSequentialContainer<FElementType>   Data;
-        MPMC_ALIGNMENT FSequentialInteger                   CurrentAccessTag;
-    };
-    
 public:
     TMPMCQueue()
     {
         IndexMask = TQueueSize - 1;
 
-        RingBuffer = UMemoryStatics::Malloc<FRingBufferNode>(TQueueSize);
-        for(int64 i = 0; i < TQueueSize; ++i)
-        {
-            RingBuffer[i].Init();
-        }
+        RingBuffer = UMemoryStatics::Calloc<FElementType>(TQueueSize);
         
         ConsumerCursor.SetVolatile(0);
         ProducerCursor.SetVolatile(0);
@@ -330,7 +274,7 @@ public:
         RingBuffer = nullptr;
     }
     
-    bool Enqueue(const FElementType& NewElement)
+    EMPMCQueueErrorStatus Enqueue(const FElementType& NewElement)
     {
         const int64 CurrentConsumerCursor = ConsumerCursor.Get();
         const int64 CurrentProducerCursor = ProducerCursor.Get();
@@ -338,43 +282,43 @@ public:
         /** Return false if the buffer is full */
         if((CurrentProducerCursor + 1) == CurrentConsumerCursor)
         {
-            return false;
+            return EMPMCQueueErrorStatus::BUFFER_FULL;
         }
-        
-        const int64 ClaimedIndex = ProducerCursor.IncrementAndGetOldValue();
+
+        const int ClaimedIndex = ProducerCursor.IncrementAndGetOldValue(); // fetch_add
 
         if(RingBuffer == nullptr)
         {
-            return false;
+            return EMPMCQueueErrorStatus::BUFFER_NOT_INITIALIZED;
         }
         
         /** Update the index on the ring buffer with the new element */
-        RingBuffer[CalculateIndex(ClaimedIndex)].SetNodeData(NewElement);
+        RingBuffer[CalculateIndex(ClaimedIndex)] = NewElement;
         
-        return true;
+        return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
     }
 
-    bool Dequeue(FElementType& Output)
+    EMPMCQueueErrorStatus Dequeue(FElementType& Output)
     {
         const int64 CurrentConsumerCursor = ConsumerCursor.Get();
         const int64 CurrentProducerCursor = ProducerCursor.Get();
 
         if(CurrentConsumerCursor == CurrentProducerCursor)
         {
-            return false;
+            return EMPMCQueueErrorStatus::BUFFER_EMPTY;
         }
 
         const int64 ClaimedIndex = ConsumerCursor.IncrementAndGetOldValue();
 
         if(RingBuffer == nullptr)
         {
-            return false;
+            return EMPMCQueueErrorStatus::BUFFER_NOT_INITIALIZED;
         }
         
         /** Store the claimed element from the ring buffer in the Output var */
-        Output = RingBuffer[CalculateIndex(ClaimedIndex)].GetNodeData();
+        Output = RingBuffer[CalculateIndex(ClaimedIndex)];
         
-        return true;
+        return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
     }
     
 private:
@@ -388,17 +332,15 @@ private:
         return IndexValue & GetIndexMask();
     }
     
-
-    
 private:
     MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
-    alignas(alignof(volatile int64) * 2) volatile int64         IndexMask; // not a clue TODO:
+    alignas(alignof(volatile int64) * 2) volatile int64        IndexMask; // not a clue TODO:
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
-    FRingBufferNode*                              RingBuffer;
+    MPMC_ALIGNMENT FElementType*                               RingBuffer;
     MPMC_PADDING PadToAvoidContention2[PLATFORM_CACHE_LINE_SIZE] = { };
-    MPMC_ALIGNMENT FSequentialInteger                           ConsumerCursor;
+    MPMC_ALIGNMENT FSequentialInteger                          ConsumerCursor;
     MPMC_PADDING PadToAvoidContention3[PLATFORM_CACHE_LINE_SIZE] = { };
-    MPMC_ALIGNMENT FSequentialInteger                           ProducerCursor;
+    MPMC_ALIGNMENT FSequentialInteger                          ProducerCursor;
     MPMC_PADDING PadToAvoidContention4[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
