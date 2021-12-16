@@ -37,6 +37,9 @@ typedef unsigned long long uint64;
 
 #define TARRAY_INITIAL_VALUE -1
 
+/**
+ * TODO
+ */
 class UMemoryStatics
 {
 public:
@@ -48,6 +51,9 @@ public:
     }
 };
 
+/**
+ * TODO
+ */
 template<typename T, int64 TReserveSize>
 class MPMC_ALIGNMENT TArray
 {
@@ -116,6 +122,9 @@ private:
 
 #define SEQUENCE_ERROR_VALUE -2
 
+/**
+ * TODO
+ */
 template <typename T>
 class MPMC_ALIGNMENT TSequentialContainer : public FNoncopyable
 {
@@ -136,27 +145,39 @@ public:
         TSequentialContainer();
         Data.store(InitialValue, std::memory_order_seq_cst);
     }
-
+    
+    /**
+     * TODO
+     */
     FORCEINLINE T Get() const
     {
         const T OutCopy = Data.load(std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_acquire);
         return OutCopy;
     }
-
+    
+    /**
+     * TODO
+     */
     FORCEINLINE void Set(const T& NewData)
     {
         std::atomic_thread_fence(std::memory_order_release);
         Data.store(NewData, std::memory_order_relaxed);
     }
-
+    
+    /**
+     * TODO
+     */
     FORCEINLINE void SetVolatile(const T& NewData)
     {
         std::atomic_thread_fence(std::memory_order_release);
         Data.store(NewData, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_seq_cst);
     }
-
+    
+    /**
+     * TODO
+     */
     FORCEINLINE bool CompareAndSet(T& Expected, const T& NewValue)
     {
         return Data.compare_exchange_weak(Expected, NewValue,
@@ -165,10 +186,16 @@ public:
     
 protected:
     MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+    /**
+     * TODO
+     */
     MPMC_ALIGNMENT std::atomic<T> Data;
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
+/**
+ * TODO
+ */
 class MPMC_ALIGNMENT FSequentialInteger : public TSequentialContainer<int64>
 {
 public:
@@ -177,23 +204,35 @@ public:
     {
         Data.store(InitialValue, std::memory_order_relaxed);
     }
-
+    
+    /**
+     * TODO
+     */
     FORCEINLINE int64 AddAndGetOldValue(const int64 Value)
     {
         return Data.fetch_add(Value, std::memory_order_acq_rel);
     }
-
+    
+    /**
+     * TODO
+     */
     FORCEINLINE int64 AddAndGetNewValue(const int64 Value)
     {
         return AddAndGetOldValue(Value) + Value;
     }
 
+    /**
+     * TODO
+     */
     FORCEINLINE int64 IncrementAndGetOldValue()
     {
         return AddAndGetOldValue(1);
     }
 };
 
+/**
+ * TODO
+ */
 template<uint64 TReserveSize>
 class MPMC_ALIGNMENT FBarrierBase
 {
@@ -202,13 +241,19 @@ public:
     {
         ListOfActiveSequences.reserve(TReserveSize);
     }
-
+    
+    /**
+     * TODO
+     */
     bool AddNewActiveSequence(const int64 NewSequenceValue)
     {
         ListOfActiveSequences.emplace_back(NewSequenceValue);
         return true;
     }
-    
+
+    /**
+     * TODO
+     */
     void GetAllActiveSequences(std::vector<int64>& Output)
     {
         for(int64 i = 0; i < ListOfActiveSequences.size(); i++)
@@ -236,10 +281,16 @@ public:
 
 protected:
     MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+    /**
+     * TODO
+     */
     MPMC_ALIGNMENT FSequentialInteger Current;
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
+/**
+ * TODO
+ */
 enum class EMPMCQueueErrorStatus : uint8
 {
     TRANSACTION_SUCCESS,
@@ -248,6 +299,14 @@ enum class EMPMCQueueErrorStatus : uint8
     BUFFER_NOT_INITIALIZED
 };
 
+/**
+ * A Lockless Multi-Producer, Multi-Consumer Queue that uses
+ * a bounded ring buffer to store the data. All access to the ring buffer
+ * is guarded by the use of two cursors, which use memory barriers and
+ * a fetch_add 
+ *
+ * @biref A Lockless Multi-Producer, Multi-Consumer Queue.
+ */
 template <typename T, uint64 TQueueSize>
 class TMPMCQueue final : public FNoncopyable
 {
@@ -273,7 +332,18 @@ public:
         free(RingBuffer);
         RingBuffer = nullptr;
     }
-    
+
+    /**
+     * Add a new element to the queue.
+     *
+     * @link Dequeue()
+     * @link FSequentialInteger::Get()
+     * @link TSequentialContainer::IncrementAndGetOldValue()
+     * @link CalculateIndex()
+     * @param NewElement The new element to add to the queue.
+     *
+     * @return An error status, used to check if the add worked.
+     */
     EMPMCQueueErrorStatus Enqueue(const FElementType& NewElement)
     {
         const int64 CurrentConsumerCursor = ConsumerCursor.Get();
@@ -285,7 +355,7 @@ public:
             return EMPMCQueueErrorStatus::BUFFER_FULL;
         }
 
-        const int ClaimedIndex = ProducerCursor.IncrementAndGetOldValue(); // fetch_add
+        const int64 ClaimedIndex = ProducerCursor.IncrementAndGetOldValue(); // fetch_add
 
         if(RingBuffer == nullptr)
         {
@@ -298,6 +368,18 @@ public:
         return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
     }
 
+    /**
+     * Add a new element to the queue.
+     *
+     * @link Enqueue()
+     * @link FSequentialInteger::Get()
+     * @link TSequentialContainer::IncrementAndGetOldValue()
+     * @link CalculateIndex()
+     * @param Output A reference to the variable to store the output in.
+     *
+     * @link EMPMCQueueErrorStatus
+     * @return An error status, used to check if the add worked.
+     */
     EMPMCQueueErrorStatus Dequeue(FElementType& Output)
     {
         const int64 CurrentConsumerCursor = ConsumerCursor.Get();
@@ -322,11 +404,19 @@ public:
     }
     
 private:
+    /**
+     * @return Return the value of the @link IndexMask
+     */
     FORCEINLINE int64 GetIndexMask() const noexcept
     {
         return IndexMask;
     }
 
+    /**
+     * @return Calculate an index for the ring buffer.
+     * This avoids using modulo (%) in favour of a bitmask (&), which is faster.
+     * For this to work the @link IndexMask MUST be a power of two minus one e.g 1023.
+     */
     FORCEINLINE int64 CalculateIndex(const uint64 IndexValue) const noexcept
     {
         return IndexValue & GetIndexMask();
@@ -334,12 +424,24 @@ private:
     
 private:
     MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
-    alignas(alignof(volatile int64) * 2) volatile int64        IndexMask; // not a clue TODO:
+    /** Stores a value that MUST be one less than a power of two e.g 1023.
+    * Used to calculate an index for access to the @link RingBuffer.
+    */
+    alignas(alignof(volatile int64) * 2) volatile int64        IndexMask; 
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+    /**
+     * TODO:
+     */
     MPMC_ALIGNMENT FElementType*                               RingBuffer;
     MPMC_PADDING PadToAvoidContention2[PLATFORM_CACHE_LINE_SIZE] = { };
+    /**
+     * TODO:
+     */
     MPMC_ALIGNMENT FSequentialInteger                          ConsumerCursor;
     MPMC_PADDING PadToAvoidContention3[PLATFORM_CACHE_LINE_SIZE] = { };
+    /**
+     * TODO:
+     */
     MPMC_ALIGNMENT FSequentialInteger                          ProducerCursor;
     MPMC_PADDING PadToAvoidContention4[PLATFORM_CACHE_LINE_SIZE] = { };
 };
