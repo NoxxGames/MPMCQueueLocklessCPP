@@ -49,7 +49,7 @@ MyQueue.Dequeue(MyInteger);
 The claimed result will be stored in "MyInteger", in this case.
 
 ## Example Benchmark code
-The below code shows a very simple example with just one producer and one consumer.
+The below code shows a very simple example with two producers and consumers.
 Adjust the TIMES_TO_CYCLE macro to make the benchmark run for longer. 
 ```c++
 #include "MPMCQueue.h"
