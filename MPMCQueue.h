@@ -12,7 +12,7 @@
 #include <atomic>
 #include <vector>
 
-#include <new>
+#include <thread>
 
 typedef signed char        int8;
 typedef short              int16;
@@ -35,8 +35,6 @@ typedef unsigned long long uint64;
 #define FORCEINLINE inline
 #endif
 
-#define TARRAY_INITIAL_VALUE -1
-
 /**
  * TODO
  */
@@ -54,50 +52,15 @@ public:
 /**
  * TODO
  */
-template<typename T, int64 TReserveSize>
-class MPMC_ALIGNMENT TArray
+class UThreadStatics
 {
 public:
-    TArray()
-    {
-        Array = UMemoryStatics::Calloc<T>(TReserveSize);
-        // Init all elements
-        for(int i = 0; i < TReserveSize; ++i)
-        {
-            Array->emplace_back(TARRAY_INITIAL_VALUE);
-        }
-    }
-
-    ~TArray()
-    {
-        // Dealloc the vector
-        delete Array;
-    }
-
-    void AddNew()
-    {
-        
-    }
-
-    void RemoveByIndex(const uint64 Index)
-    {
-        
-    }
-
-    void GetElement(T& Output, const uint64 Index)
-    {
-        Output = Array[Index];
-    }
+    using FThreadID = std::thread::id;
     
-    T GetElement(const uint64 Index)
+    static FORCEINLINE FThreadID GetUniqueThreadID() noexcept
     {
-        return Array[Index];
+        return std::this_thread::get_id();
     }
-    
-protected:
-    MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
-    MPMC_ALIGNMENT T* Array;
-    MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
 /**
@@ -155,6 +118,14 @@ public:
         std::atomic_thread_fence(std::memory_order_acquire);
         return OutCopy;
     }
+
+    /**
+     * TODO
+     */
+    FORCEINLINE T GetRelaxed() const
+    {
+        return Data.load(std::memory_order_relaxed);
+    }
     
     /**
      * TODO
@@ -202,7 +173,7 @@ public:
     FSequentialInteger(const int64 InitialValue = 0)
         : TSequentialContainer()
     {
-        Data.store(InitialValue, std::memory_order_relaxed);
+        SetVolatile(InitialValue);
     }
     
     /**
@@ -214,7 +185,7 @@ public:
     }
     
     /**
-     * TODO
+     * @link AddAndGetOldValue()
      */
     FORCEINLINE int64 AddAndGetNewValue(const int64 Value)
     {
@@ -222,7 +193,8 @@ public:
     }
 
     /**
-     * TODO
+     * @link AddAndGetNewValue()
+     * @link AddAndGetOldValue()
      */
     FORCEINLINE int64 IncrementAndGetOldValue()
     {
@@ -269,6 +241,9 @@ protected:
 
 };
 
+/**
+ * TODO
+ */
 template<uint64 TReserveSize>
 class MPMC_ALIGNMENT FConsumerBarrier : FBarrierBase<TReserveSize>
 {
@@ -312,12 +287,32 @@ class TMPMCQueue final : public FNoncopyable
 {
 private:
     using FElementType = T;
+    using FCursor = FSequentialInteger;
 
 public:
     TMPMCQueue()
     {
-        IndexMask = TQueueSize - 1;
+        if(TQueueSize == 0)
+        {
+            return;
+        }
+        
+        uint64 NearestPower = TQueueSize;
+        
+        /**
+         * Round up to the nearest power of two.
+         * @ref https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
+         */
+        NearestPower--;
+        NearestPower |= NearestPower >> 1;
+        NearestPower |= NearestPower >> 2;
+        NearestPower |= NearestPower >> 4;
+        NearestPower |= NearestPower >> 8;
+        NearestPower |= NearestPower >> 16;
+        NearestPower++;
+        IndexMask = NearestPower - 1; // Set the IndexMask to be one less than the NearestPower
 
+        /** Allocate the ring buffer. */
         RingBuffer = UMemoryStatics::Calloc<FElementType>(TQueueSize);
         
         ConsumerCursor.SetVolatile(0);
@@ -437,12 +432,12 @@ private:
     /**
      * TODO:
      */
-    MPMC_ALIGNMENT FSequentialInteger                          ConsumerCursor;
+    MPMC_ALIGNMENT FCursor                                      ConsumerCursor;
     MPMC_PADDING PadToAvoidContention3[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
      * TODO:
      */
-    MPMC_ALIGNMENT FSequentialInteger                          ProducerCursor;
+    MPMC_ALIGNMENT FCursor                                      ProducerCursor;
     MPMC_PADDING PadToAvoidContention4[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
