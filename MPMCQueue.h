@@ -297,11 +297,16 @@ public:
             return;
         }
 
+        /** @cite https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2 */
         uint64 NearestPower = 1;
-        while(NearestPower < TQueueSize)
-        {
-            NearestPower = NearestPower * 2;
-        }
+        NearestPower--;
+        NearestPower |= NearestPower >> 1; // 2 bit
+        NearestPower |= NearestPower >> 2; // 4 bit
+        NearestPower |= NearestPower >> 4; // 8 bit
+        NearestPower |= NearestPower >> 8; // 16 bit
+        NearestPower |= NearestPower >> 16; // 32 bit
+        NearestPower |= NearestPower >> 32; // 64 bit
+        NearestPower++;
         IndexMask = NearestPower - 1; // Set the IndexMask to be one less than the NearestPower
 
         /** Allocate the ring buffer. */
@@ -343,9 +348,6 @@ public:
         }
 
         const int64 ClaimedIndex = ProducerCursor.IncrementAndGetOldValue(); // fetch_add
-
-        if(RingBuffer == nullptr)
-            return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
         
         /** Update the index on the ring buffer with the new element */
         RingBuffer[CalculateIndex(ClaimedIndex)] = NewElement;
@@ -376,9 +378,6 @@ public:
         }
 
         const int64 ClaimedIndex = ConsumerCursor.IncrementAndGetOldValue();
-
-        if(RingBuffer == nullptr)
-            return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
         
         /** Store the claimed element from the ring buffer in the Output var */
         Output = RingBuffer[CalculateIndex(ClaimedIndex)];
