@@ -296,24 +296,16 @@ public:
         {
             return;
         }
-        
-        uint64 NearestPower = TQueueSize;
-        
-        /**
-         * Round up to the nearest power of two.
-         * @ref https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
-         */
-        NearestPower--;
-        NearestPower |= NearestPower >> 1;
-        NearestPower |= NearestPower >> 2;
-        NearestPower |= NearestPower >> 4;
-        NearestPower |= NearestPower >> 8;
-        NearestPower |= NearestPower >> 16;
-        NearestPower++;
+
+        uint64 NearestPower = 1;
+        while(NearestPower < TQueueSize)
+        {
+            NearestPower = NearestPower * 2;
+        }
         IndexMask = NearestPower - 1; // Set the IndexMask to be one less than the NearestPower
 
         /** Allocate the ring buffer. */
-        RingBuffer = UMemoryStatics::Calloc<FElementType>(TQueueSize);
+        RingBuffer = UMemoryStatics::Calloc<FElementType>(NearestPower);
         
         ConsumerCursor.SetVolatile(0);
         ProducerCursor.SetVolatile(0);
@@ -353,9 +345,7 @@ public:
         const int64 ClaimedIndex = ProducerCursor.IncrementAndGetOldValue(); // fetch_add
 
         if(RingBuffer == nullptr)
-        {
-            return EMPMCQueueErrorStatus::BUFFER_NOT_INITIALIZED;
-        }
+            return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
         
         /** Update the index on the ring buffer with the new element */
         RingBuffer[CalculateIndex(ClaimedIndex)] = NewElement;
@@ -364,7 +354,7 @@ public:
     }
 
     /**
-     * Add a new element to the queue.
+     * Claim an element from the queue.
      *
      * @link Enqueue()
      * @link FSequentialInteger::Get()
@@ -388,9 +378,7 @@ public:
         const int64 ClaimedIndex = ConsumerCursor.IncrementAndGetOldValue();
 
         if(RingBuffer == nullptr)
-        {
-            return EMPMCQueueErrorStatus::BUFFER_NOT_INITIALIZED;
-        }
+            return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
         
         /** Store the claimed element from the ring buffer in the Output var */
         Output = RingBuffer[CalculateIndex(ClaimedIndex)];
