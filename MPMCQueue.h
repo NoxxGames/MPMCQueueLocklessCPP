@@ -6,13 +6,7 @@
 #ifndef MPMCQUEUE_H
 #define MPMCQUEUE_H
 
-#include "stdio.h"
-#include "stdlib.h"
-
 #include <atomic>
-#include <vector>
-
-#include <thread>
 
 typedef signed char        int8;
 typedef short              int16;
@@ -36,7 +30,7 @@ typedef unsigned long long uint64;
 #endif
 
 /**
- * TODO
+ * Static utility library for working with memory.
  */
 class UMemoryStatics
 {
@@ -46,20 +40,6 @@ public:
     static FORCEINLINE T* Calloc(const uint64 AllocationSize)
     {
         return (T*)calloc(AllocationSize, sizeof(T));
-    }
-};
-
-/**
- * TODO
- */
-class UThreadStatics
-{
-public:
-    using FThreadID = std::thread::id;
-    
-    static FORCEINLINE FThreadID GetUniqueThreadID() noexcept
-    {
-        return std::this_thread::get_id();
     }
 };
 
@@ -86,7 +66,7 @@ private:
 #define SEQUENCE_ERROR_VALUE -2
 
 /**
- * TODO
+ * A container which can ensure that access to it's data will be sequentially consistent across all accessing threads.
  */
 template <typename T>
 class MPMC_ALIGNMENT TSequentialContainer : public FNoncopyable
@@ -110,7 +90,7 @@ public:
     }
     
     /**
-     * TODO
+     * Get the data, using an acquire fence to ensure that any prior write is visible to this load.
      */
     FORCEINLINE T Get() const
     {
@@ -120,7 +100,7 @@ public:
     }
 
     /**
-     * TODO
+     * Load the data with relaxed semantics. NOTE: NOT THREAD SAFE!
      */
     FORCEINLINE T GetRelaxed() const
     {
@@ -128,7 +108,8 @@ public:
     }
     
     /**
-     * TODO
+     * Set the data, first performing a release fence.
+     * The release fence will ensure that any subsequent read will see this write.
      */
     FORCEINLINE void Set(const T& NewData)
     {
@@ -137,9 +118,10 @@ public:
     }
     
     /**
-     * TODO
+     * Set the data by first performing a release fence, then storing the data,
+     * then performing a full fence.
      */
-    FORCEINLINE void SetVolatile(const T& NewData)
+    FORCEINLINE void SetFullFence(const T& NewData)
     {
         std::atomic_thread_fence(std::memory_order_release);
         Data.store(NewData, std::memory_order_relaxed);
@@ -147,7 +129,9 @@ public:
     }
     
     /**
-     * TODO
+     * Perform a CAS operation on the stored data.
+     * Uses release semantics if works.
+     * Uses relaxed semantics if failed.
      */
     FORCEINLINE bool CompareAndSet(T& Expected, const T& NewValue)
     {
@@ -158,14 +142,15 @@ public:
 protected:
     MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
-     * TODO
+     * An atomic variable which holds the data.
      */
     MPMC_ALIGNMENT std::atomic<T> Data;
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
 /**
- * TODO
+ * A simple child class of the @link TSequentialContainer which uses an int64 instead of a template.
+ * Providing some extra functions specific to modifying an integer.
  */
 class MPMC_ALIGNMENT FSequentialInteger : public TSequentialContainer<int64>
 {
@@ -173,11 +158,13 @@ public:
     FSequentialInteger(const int64 InitialValue = 0)
         : TSequentialContainer()
     {
-        SetVolatile(InitialValue);
+        SetFullFence(InitialValue);
     }
     
     /**
-     * TODO
+     * Uses a fetch_add with Acquire/Release semantics to increment the integer.
+     *
+     * @return Returns the original value of the integer.
      */
     FORCEINLINE int64 AddAndGetOldValue(const int64 Value)
     {
@@ -203,68 +190,7 @@ public:
 };
 
 /**
- * TODO
- */
-template<uint64 TReserveSize>
-class MPMC_ALIGNMENT FBarrierBase
-{
-public:
-    FBarrierBase()
-    {
-        ListOfActiveSequences.reserve(TReserveSize);
-    }
-    
-    /**
-     * TODO
-     */
-    bool AddNewActiveSequence(const int64 NewSequenceValue)
-    {
-        ListOfActiveSequences.emplace_back(NewSequenceValue);
-        return true;
-    }
-
-    /**
-     * TODO
-     */
-    void GetAllActiveSequences(std::vector<int64>& Output)
-    {
-        for(int64 i = 0; i < ListOfActiveSequences.size(); i++)
-        {
-            Output.emplace_back(ListOfActiveSequences[i]);  
-        }
-    }
-    
-protected:
-    MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
-    MPMC_ALIGNMENT std::vector<int64> ListOfActiveSequences;
-    MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
-
-};
-
-/**
- * TODO
- */
-template<uint64 TReserveSize>
-class MPMC_ALIGNMENT FConsumerBarrier : FBarrierBase<TReserveSize>
-{
-public:
-    FConsumerBarrier()
-        : FBarrierBase()
-    {
-        
-    }
-
-protected:
-    MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
-    /**
-     * TODO
-     */
-    MPMC_ALIGNMENT FSequentialInteger Current;
-    MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
-};
-
-/**
- * TODO
+ * Enum used to represent each status output from the Enqueue/Dequeue functions inside @link TMPMCQueue
  */
 enum class EMPMCQueueErrorStatus : uint8
 {
@@ -278,7 +204,14 @@ enum class EMPMCQueueErrorStatus : uint8
  * A Lockless Multi-Producer, Multi-Consumer Queue that uses
  * a bounded ring buffer to store the data. All access to the ring buffer
  * is guarded by the use of two cursors, which use memory barriers and
- * a fetch_add 
+ * a fetch_add to synchronize access to the ring buffer.
+ *
+ * @link TSequentialContainer A sequential container of type T, which uses memory barriers to sync access to it's data.
+ * @link FSequentialInteger A sequential integer container, which uses memory barriers to sync access to it's data.
+ * @link EMPMCQueueErrorStatus Enum used to represent each status output from the Enqueue/Dequeue functions.
+ *
+ * @template T The type to use for the queue.
+ * @template TQueueSize The size you want the queue to be. This will be rounded UP to the nearest power of two.
  *
  * @biref A Lockless Multi-Producer, Multi-Consumer Queue.
  */
@@ -312,8 +245,8 @@ public:
         /** Allocate the ring buffer. */
         RingBuffer = UMemoryStatics::Calloc<FElementType>(NearestPower);
         
-        ConsumerCursor.SetVolatile(0);
-        ProducerCursor.SetVolatile(0);
+        ConsumerCursor.SetFullFence(0);
+        ProducerCursor.SetFullFence(0);
     }
 
     ~TMPMCQueue()
@@ -412,17 +345,18 @@ private:
     alignas(alignof(volatile int64) * 2) volatile int64        IndexMask; 
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
-     * TODO:
+     * This is the pointer to the ring buffer which holds the queue's data.
+     * This is allocated in the default constructor using calloc.
      */
     MPMC_ALIGNMENT FElementType*                               RingBuffer;
     MPMC_PADDING PadToAvoidContention2[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
-     * TODO:
+     * The cursor that holds the next available index on the ring buffer for Consumers.
      */
     MPMC_ALIGNMENT FCursor                                      ConsumerCursor;
     MPMC_PADDING PadToAvoidContention3[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
-     * TODO:
+     * The cursor that holds the next available index on the ring buffer for Producers.
      */
     MPMC_ALIGNMENT FCursor                                      ProducerCursor;
     MPMC_PADDING PadToAvoidContention4[PLATFORM_CACHE_LINE_SIZE] = { };
