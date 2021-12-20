@@ -292,7 +292,7 @@ private:
 public:
     TMPMCQueue()
     {
-        if(TQueueSize == 0)
+        if(TQueueSize == 0 || TQueueSize > UINT64_MAX)
         {
             return;
         }
