@@ -49,89 +49,60 @@ MyQueue.Dequeue(MyInteger);
 The claimed result will be stored in "MyInteger", in this case.
 
 ## Example Benchmark code
-The below code shows a very simple example with two producers and consumers.
-Adjust the TIMES_TO_CYCLE macro to make the benchmark run for longer. 
+The following code will create THREAD_COUNT number of threads, which will
+each either produce an item and add it to the queue, or consume an item from the queue
+TIMES_TO_CYCLE number of times. The main thread waits for all threads to finish
+before the program terminates. A simple atomic counter is used to track how many
+threads have finished by having each threads increment the counter when they're
+done, so we just wait until the counter == THREAD_COUNT, then the program terminates.
 ```c++
 #include "MPMCQueue.h"
 
 #include <thread>
 
 /** Define how many times to Produce/Consume an element. */
-#define TIMES_TO_CYCLE 100000000
+#define TIMES_TO_CYCLE  10000000
+#define THREAD_COUNT    32
 
-std::atomic<bool> ProducerFinished1 = {false};
-std::atomic<bool> ConsumerFinished1 = {false};
-
-std::atomic<bool> ProducerFinished2 = {false};
-std::atomic<bool> ConsumerFinished2 = {false};
+static TMPMCQueue<int, 419444> MyQueue;
+static FSequentialInteger ThreadsCompleteCount;
 
 int main()
 {
-    TMPMCQueue<int, 4194304> MyQueue;
-
-    /** Producer 1 Thread */
-    std::thread([&]()
+    // Create a Producer & Consumer per iteration
+    for(int64 i = 0; i < (THREAD_COUNT / 2); ++i)
     {
-        const int NumberToAddLoads = 100;
-        for(int i = 0; i < TIMES_TO_CYCLE; i++)
+        // Create a Producer
+        std::thread([]()
         {
-            MyQueue.Enqueue(NumberToAddLoads);
-        }
-
-        ProducerFinished1.store(true);
-    }).detach();
-
-    /** Producer 2 Thread */
-    std::thread([&]()
-    {
-        const int NumberToAddLoads = 100;
-        for(int i = 0; i < TIMES_TO_CYCLE; i++)
+            const int NumberToAddLoads = 100;
+            for(int64 j = 0; j < TIMES_TO_CYCLE; j++)
+            {
+                MyQueue.Enqueue(NumberToAddLoads);
+            }
+            
+            ThreadsCompleteCount.IncrementAndGetOldValue();
+        }).detach();
+        
+        // Create a Consumer
+        std::thread([]()
         {
-            MyQueue.Enqueue(NumberToAddLoads);
-        }
-
-        ProducerFinished2.store(true);
-    }).detach();
-
-    /** Consumer 1 Thread */
-    std::thread([&]()
-    {
-        int32 NumberToHoldLoads = 0;
-        for(int i = 0; i < TIMES_TO_CYCLE; i++)
-        {
-            MyQueue.Dequeue(NumberToHoldLoads);
-        }
-        ConsumerFinished1.store(true);
-    }).detach();
-
-    /** Consumer 2 Thread */
-    std::thread([&]()
-    {
-        int32 NumberToHoldLoads = 0;
-        for(int i = 0; i < TIMES_TO_CYCLE; i++)
-        {
-            MyQueue.Dequeue(NumberToHoldLoads);
-        }
-        ConsumerFinished2.store(true);
-    }).detach();
-
-    /** Spin yield until the four threads are complete */
-    while(!ProducerFinished1.load(std::memory_order_relaxed) ||
-        !ConsumerFinished1.load(std::memory_order_relaxed) ||
-        !ProducerFinished2.load(std::memory_order_relaxed) ||
-        !ConsumerFinished2.load(std::memory_order_relaxed))
-    {
-        std::this_thread::yield();
+            int NumberToHoldLoads = 0;
+            for(int64 j = 0; j < TIMES_TO_CYCLE; ++j)
+            {
+               MyQueue.Dequeue(NumberToHoldLoads);
+            }
+                    
+            ThreadsCompleteCount.IncrementAndGetOldValue();
+        }).detach();
     }
+    
+    /** Spin yield until the four threads are complete */
+    while(ThreadsCompleteCount.GetRelaxed() < THREAD_COUNT)
+    { }
     
     system("pause");
     return 0;
 }
+}
 ```
-
-## TODO
-
-Presently there is no good solution to the ABA problem in the queue. Mainly because I haven't had time yet, but
-my current line of thinking is to do something similar to the LMAX Disruptor. Where the amount of producers, and
-the amount of consumers is tracked. This allows for new producers & consumers to coordinate with each other
-as they obtain and release access to the two cursors, making sure they don't step over each other as per the ABA problem.

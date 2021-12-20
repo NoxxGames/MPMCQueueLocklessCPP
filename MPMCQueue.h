@@ -21,8 +21,6 @@ typedef unsigned long long uint64;
 #define MPMC_ALIGNMENT alignas(PLATFORM_CACHE_LINE_SIZE)
 #define MPMC_PADDING MPMC_ALIGNMENT uint8
 
-#define SPIN_WAIT_COUNT 1000
-
 #if defined(_WIN32) || defined(__CYGWIN__)
 #define FORCEINLINE __forceinline
 #else
@@ -69,7 +67,7 @@ private:
  * A container which can ensure that access to it's data will be sequentially consistent across all accessing threads.
  */
 template <typename T>
-class MPMC_ALIGNMENT TSequentialContainer : public FNoncopyable
+class TSequentialContainer : public FNoncopyable
 {
 public:
     TSequentialContainer()
@@ -144,7 +142,7 @@ protected:
     /**
      * An atomic variable which holds the data.
      */
-    MPMC_ALIGNMENT std::atomic<T> Data;
+    std::atomic<T> Data;
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
@@ -152,7 +150,7 @@ protected:
  * A simple child class of the @link TSequentialContainer which uses an int64 instead of a template.
  * Providing some extra functions specific to modifying an integer.
  */
-class MPMC_ALIGNMENT FSequentialInteger : public TSequentialContainer<int64>
+class FSequentialInteger : public TSequentialContainer<int64>
 {
 public:
     FSequentialInteger(const int64 InitialValue = 0)
@@ -225,12 +223,15 @@ private:
 public:
     TMPMCQueue()
     {
-        if(TQueueSize == 0 || TQueueSize > UINT64_MAX)
+        if(TQueueSize == 0 || TQueueSize == UINT64_MAX)
         {
             return;
         }
 
-        /** @cite https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2 */
+        /**
+         * Ceil the queue size to the nearest power of 2
+         * @cite https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
+         */
         uint64 NearestPower = 1;
         NearestPower--;
         NearestPower |= NearestPower >> 1; // 2 bit
@@ -240,7 +241,7 @@ public:
         NearestPower |= NearestPower >> 16; // 32 bit
         NearestPower |= NearestPower >> 32; // 64 bit
         NearestPower++;
-        IndexMask = NearestPower - 1; // Set the IndexMask to be one less than the NearestPower
+        IndexMask.SetFullFence(NearestPower - 1); // Set the IndexMask to be one less than the NearestPower
 
         /** Allocate the ring buffer. */
         RingBuffer = UMemoryStatics::Calloc<FElementType>(NearestPower);
@@ -264,7 +265,6 @@ public:
      * @link Dequeue()
      * @link FSequentialInteger::Get()
      * @link TSequentialContainer::IncrementAndGetOldValue()
-     * @link CalculateIndex()
      * @param NewElement The new element to add to the queue.
      *
      * @return An error status, used to check if the add worked.
@@ -283,7 +283,7 @@ public:
         const int64 ClaimedIndex = ProducerCursor.IncrementAndGetOldValue(); // fetch_add
         
         /** Update the index on the ring buffer with the new element */
-        RingBuffer[CalculateIndex(ClaimedIndex)] = NewElement;
+        RingBuffer[ClaimedIndex & IndexMask.GetRelaxed()] = NewElement;
         
         return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
     }
@@ -294,7 +294,6 @@ public:
      * @link Enqueue()
      * @link FSequentialInteger::Get()
      * @link TSequentialContainer::IncrementAndGetOldValue()
-     * @link CalculateIndex()
      * @param Output A reference to the variable to store the output in.
      *
      * @link EMPMCQueueErrorStatus
@@ -313,28 +312,9 @@ public:
         const int64 ClaimedIndex = ConsumerCursor.IncrementAndGetOldValue();
         
         /** Store the claimed element from the ring buffer in the Output var */
-        Output = RingBuffer[CalculateIndex(ClaimedIndex)];
+        Output = RingBuffer[ClaimedIndex & IndexMask.GetRelaxed()];
         
         return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
-    }
-    
-private:
-    /**
-     * @return Return the value of the @link IndexMask
-     */
-    FORCEINLINE int64 GetIndexMask() const noexcept
-    {
-        return IndexMask;
-    }
-
-    /**
-     * @return Calculate an index for the ring buffer.
-     * This avoids using modulo (%) in favour of a bitmask (&), which is faster.
-     * For this to work the @link IndexMask MUST be a power of two minus one e.g 1023.
-     */
-    FORCEINLINE int64 CalculateIndex(const uint64 IndexValue) const noexcept
-    {
-        return IndexValue & GetIndexMask();
     }
     
 private:
@@ -342,23 +322,23 @@ private:
     /** Stores a value that MUST be one less than a power of two e.g 1023.
     * Used to calculate an index for access to the @link RingBuffer.
     */
-    alignas(alignof(volatile int64) * 2) volatile int64        IndexMask; 
+    TSequentialContainer<uint64>                 IndexMask; 
     MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
      * This is the pointer to the ring buffer which holds the queue's data.
      * This is allocated in the default constructor using calloc.
      */
-    MPMC_ALIGNMENT FElementType*                               RingBuffer;
+    FElementType*                                RingBuffer;
     MPMC_PADDING PadToAvoidContention2[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
      * The cursor that holds the next available index on the ring buffer for Consumers.
      */
-    MPMC_ALIGNMENT FCursor                                      ConsumerCursor;
+    FCursor                                      ConsumerCursor;
     MPMC_PADDING PadToAvoidContention3[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
      * The cursor that holds the next available index on the ring buffer for Producers.
      */
-    MPMC_ALIGNMENT FCursor                                      ProducerCursor;
+    FCursor                                      ProducerCursor;
     MPMC_PADDING PadToAvoidContention4[PLATFORM_CACHE_LINE_SIZE] = { };
 };
 
