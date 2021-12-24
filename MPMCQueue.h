@@ -10,10 +10,9 @@
 #include "stdlib.h"
 
 #include <atomic>
+#include <vector>
 
 #define PLATFORM_CACHE_LINE_SIZE 64
-
-#define SEQUENCE_ERROR_VALUE -2
 
 /**
  * A container which can ensure that access to it's data will be sequentially consistent across all accessing threads.
@@ -57,6 +56,11 @@ public:
         return Data.load(std::memory_order_relaxed);
     }
     
+    T GetCustom(const std::memory_order MemoryOrder) const
+    {
+        return Data.load(MemoryOrder);
+    }
+    
     /**
      * Set the data, first performing a release fence.
      * The release fence will ensure that any subsequent read will see this write.
@@ -76,6 +80,11 @@ public:
         std::atomic_thread_fence(std::memory_order_release);
         Data.store(NewData, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
+    
+    void SetCustom(const T& NewData, const std::memory_order MemoryOrder)
+    {
+        Data.store(NewData, MemoryOrder);
     }
     
     /**
@@ -149,6 +158,16 @@ public:
     {
         IncrementAndGetOldValue();
     }
+
+    void IncrementRelaxed()
+    {
+        Data.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void operator=(const int_fast64_t NewValue)
+    {
+        SetFullFence(NewValue);
+    }
 };
 
 /**
@@ -200,7 +219,7 @@ public:
          * Ceil the queue size to the nearest power of 2
          * @cite https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
          */
-        uint_fast64_t NearestPower = 1;
+        uint_fast64_t NearestPower = TQueueSize;
         {
             NearestPower--;
             NearestPower |= NearestPower >> 1; // 2 bit
@@ -212,17 +231,14 @@ public:
             NearestPower++;
         }
 
-        IndexMask.SetFullFence(NearestPower - 1); // Set the IndexMask to be one less than the NearestPower
+        IndexMask.store(NearestPower - 1); // Set the IndexMask to be one less than the NearestPower
 
         /** Allocate the ring buffer. */
         RingBuffer = (FBufferNode*)calloc(NearestPower, sizeof(FBufferNode));
-
         for(uint_fast64_t i = 0; i < NearestPower; ++i)
         {
             RingBuffer[i].Data = (FElementType*)malloc(sizeof(FElementType));
-            RingBuffer[i].AccessCount.SetFullFence(0);
         }
-        
         
         ConsumerCursor.SetFullFence(0);
         ProducerCursor.SetFullFence(0);
@@ -257,18 +273,17 @@ public:
         {
             return EMPMCQueueErrorStatus::BUFFER_FULL;
         }
-
+        
         const int_fast64_t ClaimedIndex = ProducerCursor.IncrementAndGetOldValue(); // fetch_add
-        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask.GetRelaxed();
+        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask.load(std::memory_order_relaxed);
         
         /** Update the index on the ring buffer with the new element */
         *RingBuffer[ClaimedIndexMask].Data = NewElement;
-        RingBuffer[ClaimedIndexMask].AccessCount.Increment();
         
         return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
     }
 
-    EMPMCQueueErrorStatus EnqueueCAS()
+    EMPMCQueueErrorStatus EnqueueCAS(const FElementType& NewElement)
     {
         const int_fast64_t CurrentConsumerCursor = ConsumerCursor.Get();
         const int_fast64_t CurrentProducerCursor = ProducerCursor.Get();
@@ -278,8 +293,19 @@ public:
         {
             return EMPMCQueueErrorStatus::BUFFER_FULL;
         }
-
-        // todo
+        
+        int_fast64_t ClaimedIndex = CurrentProducerCursor;
+        
+        while(!ProducerCursor.CompareAndSet(ClaimedIndex, ClaimedIndex + 1))
+        {
+            ClaimedIndex = ProducerCursor.Get();
+            _mm_pause();
+        }
+        
+        const int_fast64_t ThisIndexMask = ClaimedIndex & IndexMask;
+        
+        /** Update the index on the ring buffer with the new element */
+        *RingBuffer[ThisIndexMask].Data = NewElement;
         
         return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
     }
@@ -306,15 +332,40 @@ public:
         }
 
         const int_fast64_t ClaimedIndex = ConsumerCursor.IncrementAndGetOldValue();
-        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask.GetRelaxed();
+        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask;
         
         /** Store the claimed element from the ring buffer in the Output var */
         Output = *RingBuffer[ClaimedIndexMask].Data;
-        RingBuffer[ClaimedIndexMask].AccessCount.Increment();
         
         return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
     }
 
+    EMPMCQueueErrorStatus DequeueCAS(FElementType& Output)
+    {
+        const int_fast64_t CurrentConsumerCursor = ConsumerCursor.Get();
+        const int_fast64_t CurrentProducerCursor = ProducerCursor.Get();
+        
+        if(CurrentConsumerCursor == CurrentProducerCursor)
+        {
+            return EMPMCQueueErrorStatus::BUFFER_EMPTY;
+        }
+        
+        int_fast64_t ClaimedIndex = CurrentConsumerCursor;
+
+        while(!ConsumerCursor.CompareAndSet(ClaimedIndex, ClaimedIndex + 1))
+        {
+            ClaimedIndex = ConsumerCursor.Get();
+            _mm_pause();
+        }
+        
+        const int_fast64_t ThisIndexMask = ClaimedIndex & IndexMask.load(std::memory_order_relaxed);
+        
+        /** Update the index on the ring buffer with the new element */
+        Output = *RingBuffer[ThisIndexMask].Data;
+        
+        return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
+    }
+    
     /**
      * TODO: not thread safe 
      */
@@ -349,15 +400,13 @@ private:
     struct FBufferNode
     {
         FBufferNode() noexcept
-            : Data(nullptr), AccessCount(0)
+            : Data(nullptr)
         {
         }
         
         uint_fast8_t PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
         FElementType* Data;
         uint_fast8_t PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
-        FSequentialInteger AccessCount;
-        uint_fast8_t PadToAvoidContention2[PLATFORM_CACHE_LINE_SIZE] = { };
     };
     
 private:
@@ -365,7 +414,7 @@ private:
     /** Stores a value that MUST be one less than a power of two e.g 1023.
     * Used to calculate an index for access to the @link RingBuffer.
     */
-    TSequentialContainer<uint_fast64_t>         IndexMask; 
+    std::atomic<uint_fast64_t>                  IndexMask; 
     uint_fast8_t PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
      * This is the pointer to the ring buffer which holds the queue's data.
