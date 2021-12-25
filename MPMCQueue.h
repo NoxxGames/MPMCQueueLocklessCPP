@@ -410,6 +410,7 @@ private:
     FCursor                                     ProducerCursor;
     MPMC_PADDING(PadThai);
 
+    
 private:
     TMPMCQueue(const TMPMCQueue&) = delete;
     TMPMCQueue& operator=(const TMPMCQueue&) = delete;
