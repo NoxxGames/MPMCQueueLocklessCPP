@@ -81,7 +81,7 @@ int main()
                 MyQueue.Enqueue(NumberToAddLoads);
             }
             
-            ThreadsCompleteCount.IncrementAndGetOldValue();
+            ThreadsCompleteCount.Increment();
         }).detach();
         
         // Create a Consumer
@@ -93,7 +93,7 @@ int main()
                MyQueue.Dequeue(NumberToHoldLoads);
             }
                     
-            ThreadsCompleteCount.IncrementAndGetOldValue();
+            ThreadsCompleteCount.Increment();
         }).detach();
     }
     
@@ -103,6 +103,5 @@ int main()
     
     system("pause");
     return 0;
-}
 }
 ```

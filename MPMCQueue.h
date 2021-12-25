@@ -6,68 +6,19 @@
 #ifndef MPMCQUEUE_H
 #define MPMCQUEUE_H
 
-#include <atomic>
+#include "stdio.h"
+#include "stdlib.h"
 
-typedef signed char        int8;
-typedef short              int16;
-typedef int                int32;
-typedef long long          int64;
-typedef unsigned char      uint8;
-typedef unsigned short     uint16;
-typedef unsigned int       uint32;
-typedef unsigned long long uint64;
+#include <atomic>
+#include <vector>
 
 #define PLATFORM_CACHE_LINE_SIZE 64
-#define MPMC_ALIGNMENT alignas(PLATFORM_CACHE_LINE_SIZE)
-#define MPMC_PADDING MPMC_ALIGNMENT uint8
-
-#if defined(_WIN32) || defined(__CYGWIN__)
-#define FORCEINLINE __forceinline
-#else
-#define FORCEINLINE inline
-#endif
-
-/**
- * Static utility library for working with memory.
- */
-class UMemoryStatics
-{
-public:
-    /** Contiguous memory allocation. All elements initialised to zero. */
-    template<typename T>
-    static FORCEINLINE T* Calloc(const uint64 AllocationSize)
-    {
-        return (T*)calloc(AllocationSize, sizeof(T));
-    }
-};
-
-/**
- * utility template for a class that should not be copyable.
- * Derive from this class to make your class non-copyable
- */
-class FNoncopyable
-{
-    /** @cite Taken from the Unreal Engine 4 Source code.
-     *  @ref <FileName> UnrealTemplate.h
-     */
-    
-protected:
-    // ensure the class cannot be constructed directly
-    FNoncopyable() {}
-    // the class should not be used in a polymorphic manner
-    ~FNoncopyable() {}
-private:
-    FNoncopyable(const FNoncopyable&);
-    FNoncopyable& operator=(const FNoncopyable&);
-};
-
-#define SEQUENCE_ERROR_VALUE -2
 
 /**
  * A container which can ensure that access to it's data will be sequentially consistent across all accessing threads.
  */
 template <typename T>
-class TSequentialContainer : public FNoncopyable
+class TSequentialContainer
 {
 public:
     TSequentialContainer()
@@ -90,7 +41,7 @@ public:
     /**
      * Get the data, using an acquire fence to ensure that any prior write is visible to this load.
      */
-    FORCEINLINE T Get() const
+    T Get() const
     {
         const T OutCopy = Data.load(std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_acquire);
@@ -100,16 +51,21 @@ public:
     /**
      * Load the data with relaxed semantics. NOTE: NOT THREAD SAFE!
      */
-    FORCEINLINE T GetRelaxed() const
+    T GetRelaxed() const
     {
         return Data.load(std::memory_order_relaxed);
+    }
+    
+    T GetCustom(const std::memory_order MemoryOrder) const
+    {
+        return Data.load(MemoryOrder);
     }
     
     /**
      * Set the data, first performing a release fence.
      * The release fence will ensure that any subsequent read will see this write.
      */
-    FORCEINLINE void Set(const T& NewData)
+    void Set(const T& NewData) 
     {
         std::atomic_thread_fence(std::memory_order_release);
         Data.store(NewData, std::memory_order_relaxed);
@@ -119,11 +75,16 @@ public:
      * Set the data by first performing a release fence, then storing the data,
      * then performing a full fence.
      */
-    FORCEINLINE void SetFullFence(const T& NewData)
+    void SetFullFence(const T& NewData)
     {
         std::atomic_thread_fence(std::memory_order_release);
         Data.store(NewData, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
+    
+    void SetCustom(const T& NewData, const std::memory_order MemoryOrder)
+    {
+        Data.store(NewData, MemoryOrder);
     }
     
     /**
@@ -131,29 +92,33 @@ public:
      * Uses release semantics if works.
      * Uses relaxed semantics if failed.
      */
-    FORCEINLINE bool CompareAndSet(T& Expected, const T& NewValue)
+    bool CompareAndSet(T& Expected, const T& NewValue)
     {
         return Data.compare_exchange_weak(Expected, NewValue,
             std::memory_order_release, std::memory_order_relaxed);
     }
     
 protected:
-    MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+    uint_fast8_t PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
      * An atomic variable which holds the data.
      */
     std::atomic<T> Data;
-    MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+    uint_fast8_t PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+
+private:
+    TSequentialContainer(const TSequentialContainer&) = delete;
+    TSequentialContainer& operator=(const TSequentialContainer&) = delete;
 };
 
 /**
  * A simple child class of the @link TSequentialContainer which uses an int64 instead of a template.
  * Providing some extra functions specific to modifying an integer.
  */
-class FSequentialInteger : public TSequentialContainer<int64>
+class FSequentialInteger : public TSequentialContainer<int_fast64_t>
 {
 public:
-    FSequentialInteger(const int64 InitialValue = 0)
+    FSequentialInteger(const int_fast64_t InitialValue = 0)
         : TSequentialContainer()
     {
         SetFullFence(InitialValue);
@@ -164,7 +129,7 @@ public:
      *
      * @return Returns the original value of the integer.
      */
-    FORCEINLINE int64 AddAndGetOldValue(const int64 Value)
+    int_fast64_t AddAndGetOldValue(const int_fast64_t Value)
     {
         return Data.fetch_add(Value, std::memory_order_acq_rel);
     }
@@ -172,7 +137,7 @@ public:
     /**
      * @link AddAndGetOldValue()
      */
-    FORCEINLINE int64 AddAndGetNewValue(const int64 Value)
+    int_fast64_t AddAndGetNewValue(const int_fast64_t Value)
     {
         return AddAndGetOldValue(Value) + Value;
     }
@@ -181,21 +146,43 @@ public:
      * @link AddAndGetNewValue()
      * @link AddAndGetOldValue()
      */
-    FORCEINLINE int64 IncrementAndGetOldValue()
+    int_fast64_t IncrementAndGetOldValue()
     {
         return AddAndGetOldValue(1);
+    }
+
+    /**
+     * @link IncrementAndGetOldValue()
+     */
+    void Increment()
+    {
+        IncrementAndGetOldValue();
+    }
+
+    void IncrementRelaxed()
+    {
+        Data.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void operator=(const int_fast64_t NewValue)
+    {
+        SetFullFence(NewValue);
     }
 };
 
 /**
  * Enum used to represent each status output from the Enqueue/Dequeue functions inside @link TMPMCQueue
  */
-enum class EMPMCQueueErrorStatus : uint8
+enum class EMPMCQueueErrorStatus : uint_fast8_t
 {
     TRANSACTION_SUCCESS,
     BUFFER_FULL,
     BUFFER_EMPTY,
-    BUFFER_NOT_INITIALIZED
+    BUFFER_NOT_INITIALIZED,
+    COPY_FAILED,
+    COPY_SUCCESS,
+    BUFFER_COPY_FAILED,
+    BUFFER_COPY_SUCCESS
 };
 
 /**
@@ -213,8 +200,8 @@ enum class EMPMCQueueErrorStatus : uint8
  *
  * @biref A Lockless Multi-Producer, Multi-Consumer Queue.
  */
-template <typename T, uint64 TQueueSize>
-class TMPMCQueue final : public FNoncopyable
+template <typename T, uint_fast64_t TQueueSize>
+class TMPMCQueue final
 {
 private:
     using FElementType = T;
@@ -232,19 +219,26 @@ public:
          * Ceil the queue size to the nearest power of 2
          * @cite https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
          */
-        uint64 NearestPower = 1;
-        NearestPower--;
-        NearestPower |= NearestPower >> 1; // 2 bit
-        NearestPower |= NearestPower >> 2; // 4 bit
-        NearestPower |= NearestPower >> 4; // 8 bit
-        NearestPower |= NearestPower >> 8; // 16 bit
-        NearestPower |= NearestPower >> 16; // 32 bit
-        NearestPower |= NearestPower >> 32; // 64 bit
-        NearestPower++;
-        IndexMask.SetFullFence(NearestPower - 1); // Set the IndexMask to be one less than the NearestPower
+        uint_fast64_t NearestPower = TQueueSize;
+        {
+            NearestPower--;
+            NearestPower |= NearestPower >> 1; // 2 bit
+            NearestPower |= NearestPower >> 2; // 4 bit
+            NearestPower |= NearestPower >> 4; // 8 bit
+            NearestPower |= NearestPower >> 8; // 16 bit
+            NearestPower |= NearestPower >> 16; // 32 bit
+            NearestPower |= NearestPower >> 32; // 64 bit
+            NearestPower++;
+        }
+
+        IndexMask.store(NearestPower - 1); // Set the IndexMask to be one less than the NearestPower
 
         /** Allocate the ring buffer. */
-        RingBuffer = UMemoryStatics::Calloc<FElementType>(NearestPower);
+        RingBuffer = (FBufferNode*)calloc(NearestPower, sizeof(FBufferNode));
+        for(uint_fast64_t i = 0; i < NearestPower; ++i)
+        {
+            RingBuffer[i].Data = (FElementType*)malloc(sizeof(FElementType));
+        }
         
         ConsumerCursor.SetFullFence(0);
         ProducerCursor.SetFullFence(0);
@@ -271,23 +265,51 @@ public:
      */
     EMPMCQueueErrorStatus Enqueue(const FElementType& NewElement)
     {
-        const int64 CurrentConsumerCursor = ConsumerCursor.Get();
-        const int64 CurrentProducerCursor = ProducerCursor.Get();
+        const int_fast64_t CurrentConsumerCursor = ConsumerCursor.Get();
+        const int_fast64_t CurrentProducerCursor = ProducerCursor.Get();
         
         /** Return false if the buffer is full */
         if((CurrentProducerCursor + 1) == CurrentConsumerCursor)
         {
             return EMPMCQueueErrorStatus::BUFFER_FULL;
         }
-
-        const int64 ClaimedIndex = ProducerCursor.IncrementAndGetOldValue(); // fetch_add
+        
+        const int_fast64_t ClaimedIndex = ProducerCursor.IncrementAndGetOldValue(); // fetch_add
+        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask.load(std::memory_order_relaxed);
         
         /** Update the index on the ring buffer with the new element */
-        RingBuffer[ClaimedIndex & IndexMask.GetRelaxed()] = NewElement;
+        *RingBuffer[ClaimedIndexMask].Data = NewElement;
         
         return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
     }
 
+    EMPMCQueueErrorStatus EnqueueCAS(const FElementType& NewElement)
+    {
+        const int_fast64_t CurrentConsumerCursor = ConsumerCursor.Get();
+        const int_fast64_t CurrentProducerCursor = ProducerCursor.Get();
+        
+        /** Return false if the buffer is full */
+        if((CurrentProducerCursor + 1) == CurrentConsumerCursor)
+        {
+            return EMPMCQueueErrorStatus::BUFFER_FULL;
+        }
+        
+        int_fast64_t ClaimedIndex = CurrentProducerCursor;
+        
+        while(!ProducerCursor.CompareAndSet(ClaimedIndex, ClaimedIndex + 1))
+        {
+            ClaimedIndex = ProducerCursor.Get();
+            _mm_pause();
+        }
+        
+        const int_fast64_t ThisIndexMask = ClaimedIndex & IndexMask;
+        
+        /** Update the index on the ring buffer with the new element */
+        *RingBuffer[ThisIndexMask].Data = NewElement;
+        
+        return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
+    }
+    
     /**
      * Claim an element from the queue.
      *
@@ -301,45 +323,119 @@ public:
      */
     EMPMCQueueErrorStatus Dequeue(FElementType& Output)
     {
-        const int64 CurrentConsumerCursor = ConsumerCursor.Get();
-        const int64 CurrentProducerCursor = ProducerCursor.Get();
+        const int_fast64_t CurrentConsumerCursor = ConsumerCursor.Get();
+        const int_fast64_t CurrentProducerCursor = ProducerCursor.Get();
 
         if(CurrentConsumerCursor == CurrentProducerCursor)
         {
             return EMPMCQueueErrorStatus::BUFFER_EMPTY;
         }
 
-        const int64 ClaimedIndex = ConsumerCursor.IncrementAndGetOldValue();
+        const int_fast64_t ClaimedIndex = ConsumerCursor.IncrementAndGetOldValue();
+        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask;
         
         /** Store the claimed element from the ring buffer in the Output var */
-        Output = RingBuffer[ClaimedIndex & IndexMask.GetRelaxed()];
+        Output = *RingBuffer[ClaimedIndexMask].Data;
+        
+        return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
+    }
+
+    EMPMCQueueErrorStatus DequeueCAS(FElementType& Output)
+    {
+        const int_fast64_t CurrentConsumerCursor = ConsumerCursor.Get();
+        const int_fast64_t CurrentProducerCursor = ProducerCursor.Get();
+        
+        if(CurrentConsumerCursor == CurrentProducerCursor)
+        {
+            return EMPMCQueueErrorStatus::BUFFER_EMPTY;
+        }
+        
+        int_fast64_t ClaimedIndex = CurrentConsumerCursor;
+
+        while(!ConsumerCursor.CompareAndSet(ClaimedIndex, ClaimedIndex + 1))
+        {
+            ClaimedIndex = ConsumerCursor.Get();
+            _mm_pause();
+        }
+        
+        const int_fast64_t ThisIndexMask = ClaimedIndex & IndexMask.load(std::memory_order_relaxed);
+        
+        /** Update the index on the ring buffer with the new element */
+        Output = *RingBuffer[ThisIndexMask].Data;
         
         return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
     }
     
+    /**
+     * TODO: not thread safe 
+     */
+    EMPMCQueueErrorStatus CopyQueue(TMPMCQueue<FElementType, TQueueSize>* OtherQueue = nullptr)
+    {
+        if(OtherQueue == nullptr || RingBuffer == nullptr)
+        {
+            return EMPMCQueueErrorStatus::COPY_FAILED;
+        }
+
+        // TODO: memcpy this queue into the other queue
+        
+        return EMPMCQueueErrorStatus::COPY_SUCCESS;
+    }
+
+    /**
+     * TODO: not thread safe
+     */
+    EMPMCQueueErrorStatus CopyRingBuffer(FElementType* OtherBuffer = nullptr)
+    {
+        if(OtherBuffer == nullptr || RingBuffer == nullptr)
+        {
+            return EMPMCQueueErrorStatus::BUFFER_COPY_FAILED;
+        }
+
+        // TODO: memcpy the buffer into the other buffer
+        
+        return EMPMCQueueErrorStatus::BUFFER_COPY_SUCCESS;
+    }
+
 private:
-    MPMC_PADDING PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+    struct FBufferNode
+    {
+        FBufferNode() noexcept
+            : Data(nullptr)
+        {
+        }
+        
+        uint_fast8_t PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+        FElementType* Data;
+        uint_fast8_t PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+    };
+    
+private:
+    uint_fast8_t PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
     /** Stores a value that MUST be one less than a power of two e.g 1023.
     * Used to calculate an index for access to the @link RingBuffer.
     */
-    TSequentialContainer<uint64>                 IndexMask; 
-    MPMC_PADDING PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+    std::atomic<uint_fast64_t>                  IndexMask; 
+    uint_fast8_t PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
      * This is the pointer to the ring buffer which holds the queue's data.
      * This is allocated in the default constructor using calloc.
      */
-    FElementType*                                RingBuffer;
-    MPMC_PADDING PadToAvoidContention2[PLATFORM_CACHE_LINE_SIZE] = { };
+    FBufferNode*                                RingBuffer;
+    uint_fast8_t PadToAvoidContention2[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
      * The cursor that holds the next available index on the ring buffer for Consumers.
      */
-    FCursor                                      ConsumerCursor;
-    MPMC_PADDING PadToAvoidContention3[PLATFORM_CACHE_LINE_SIZE] = { };
+    FCursor                                     ConsumerCursor;
+    uint_fast8_t PadToAvoidContention3[PLATFORM_CACHE_LINE_SIZE] = { };
     /**
      * The cursor that holds the next available index on the ring buffer for Producers.
      */
-    FCursor                                      ProducerCursor;
-    MPMC_PADDING PadToAvoidContention4[PLATFORM_CACHE_LINE_SIZE] = { };
+    FCursor                                     ProducerCursor;
+    uint_fast8_t PadToAvoidContention4[PLATFORM_CACHE_LINE_SIZE] = { };
+
+private:
+    TMPMCQueue(const TMPMCQueue&) = delete;
+    TMPMCQueue& operator=(const TMPMCQueue&) = delete;
 };
 
 #endif // MPMCQUEUE_H
