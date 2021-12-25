@@ -10,12 +10,13 @@
 #include "stdlib.h"
 
 #include <atomic>
-#include <vector>
 
 #define PLATFORM_CACHE_LINE_SIZE 64
+#define MPMC_PADDING(_VAR_NAME_) alignas(PLATFORM_CACHE_LINE_SIZE) uint8_t _VAR_NAME_[PLATFORM_CACHE_LINE_SIZE] = { }
 
 /**
- * A container which can ensure that access to it's data will be sequentially consistent across all accessing threads.
+ * A container which can ensure that access to it's data will be sequentially consistent across all accessing threads,
+ * but allows for getting the data via a custom memory order.
  */
 template <typename T>
 class TSequentialContainer
@@ -99,12 +100,12 @@ public:
     }
     
 protected:
-    uint_fast8_t PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_PADDING(Pad1);
     /**
      * An atomic variable which holds the data.
      */
     std::atomic<T> Data;
-    uint_fast8_t PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_PADDING(Pad2);
 
 private:
     TSequentialContainer(const TSequentialContainer&) = delete;
@@ -265,6 +266,7 @@ public:
      */
     EMPMCQueueErrorStatus Enqueue(const FElementType& NewElement)
     {
+        /** Get the Consumer & Producer cursor values, using an acquire fence */
         const int_fast64_t CurrentConsumerCursor = ConsumerCursor.Get();
         const int_fast64_t CurrentProducerCursor = ProducerCursor.Get();
         
@@ -285,6 +287,7 @@ public:
 
     EMPMCQueueErrorStatus EnqueueCAS(const FElementType& NewElement)
     {
+        /** Get the Consumer & Producer cursor values, using an acquire fence */
         const int_fast64_t CurrentConsumerCursor = ConsumerCursor.Get();
         const int_fast64_t CurrentProducerCursor = ProducerCursor.Get();
         
@@ -323,16 +326,20 @@ public:
      */
     EMPMCQueueErrorStatus Dequeue(FElementType& Output)
     {
+        /** Get the Consumer & Producer cursor values, using an acquire fence */
         const int_fast64_t CurrentConsumerCursor = ConsumerCursor.Get();
         const int_fast64_t CurrentProducerCursor = ProducerCursor.Get();
 
+        // Check if the buffer is empty
         if(CurrentConsumerCursor == CurrentProducerCursor)
         {
             return EMPMCQueueErrorStatus::BUFFER_EMPTY;
         }
 
+        /** Perform a fetch_add with acquire_release semantics */
         const int_fast64_t ClaimedIndex = ConsumerCursor.IncrementAndGetOldValue();
-        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask;
+        /** Calculate the index, avoiding the use of modulo */
+        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask.load(std::memory_order_relaxed);
         
         /** Store the claimed element from the ring buffer in the Output var */
         Output = *RingBuffer[ClaimedIndexMask].Data;
@@ -365,36 +372,6 @@ public:
         
         return EMPMCQueueErrorStatus::TRANSACTION_SUCCESS;
     }
-    
-    /**
-     * TODO: not thread safe 
-     */
-    EMPMCQueueErrorStatus CopyQueue(TMPMCQueue<FElementType, TQueueSize>* OtherQueue = nullptr)
-    {
-        if(OtherQueue == nullptr || RingBuffer == nullptr)
-        {
-            return EMPMCQueueErrorStatus::COPY_FAILED;
-        }
-
-        // TODO: memcpy this queue into the other queue
-        
-        return EMPMCQueueErrorStatus::COPY_SUCCESS;
-    }
-
-    /**
-     * TODO: not thread safe
-     */
-    EMPMCQueueErrorStatus CopyRingBuffer(FElementType* OtherBuffer = nullptr)
-    {
-        if(OtherBuffer == nullptr || RingBuffer == nullptr)
-        {
-            return EMPMCQueueErrorStatus::BUFFER_COPY_FAILED;
-        }
-
-        // TODO: memcpy the buffer into the other buffer
-        
-        return EMPMCQueueErrorStatus::BUFFER_COPY_SUCCESS;
-    }
 
 private:
     struct FBufferNode
@@ -404,35 +381,36 @@ private:
         {
         }
         
-        uint_fast8_t PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+        MPMC_PADDING(Pad1);
         FElementType* Data;
-        uint_fast8_t PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+        MPMC_PADDING(Pad2);
     };
     
 private:
-    uint_fast8_t PadToAvoidContention0[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_PADDING(Pad1);
     /** Stores a value that MUST be one less than a power of two e.g 1023.
     * Used to calculate an index for access to the @link RingBuffer.
     */
     std::atomic<uint_fast64_t>                  IndexMask; 
-    uint_fast8_t PadToAvoidContention1[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_PADDING(Pad2);
     /**
      * This is the pointer to the ring buffer which holds the queue's data.
      * This is allocated in the default constructor using calloc.
      */
     FBufferNode*                                RingBuffer;
-    uint_fast8_t PadToAvoidContention2[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_PADDING(Pad3);
     /**
      * The cursor that holds the next available index on the ring buffer for Consumers.
      */
     FCursor                                     ConsumerCursor;
-    uint_fast8_t PadToAvoidContention3[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_PADDING(Pad4);
     /**
      * The cursor that holds the next available index on the ring buffer for Producers.
      */
     FCursor                                     ProducerCursor;
-    uint_fast8_t PadToAvoidContention4[PLATFORM_CACHE_LINE_SIZE] = { };
+    MPMC_PADDING(PadThai);
 
+    
 private:
     TMPMCQueue(const TMPMCQueue&) = delete;
     TMPMCQueue& operator=(const TMPMCQueue&) = delete;
