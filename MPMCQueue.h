@@ -210,6 +210,9 @@ private:
 
 public:
     TMPMCQueue()
+        : IndexMask(CeilToNearestPowerOfTwo() - 1),
+        ProducerCursor(0),
+        ConsumerCursor(0)
     {
         if(TQueueSize == 0 || TQueueSize == UINT64_MAX)
         {
@@ -220,30 +223,10 @@ public:
          * Ceil the queue size to the nearest power of 2
          * @cite https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
          */
-        uint_fast64_t NearestPower = TQueueSize;
-        {
-            NearestPower--;
-            NearestPower |= NearestPower >> 1; // 2 bit
-            NearestPower |= NearestPower >> 2; // 4 bit
-            NearestPower |= NearestPower >> 4; // 8 bit
-            NearestPower |= NearestPower >> 8; // 16 bit
-            NearestPower |= NearestPower >> 16; // 32 bit
-            NearestPower |= NearestPower >> 32; // 64 bit
-            NearestPower++;
-        }
-
-        IndexMask.store(NearestPower - 1); // Set the IndexMask to be one less than the NearestPower
 
         /** Allocate the ring buffer. */
-        RingBuffer = (FBufferNode*)calloc(NearestPower, sizeof(FBufferNode));
-        for(uint_fast64_t i = 0; i < NearestPower; ++i)
-        {
-            RingBuffer[i].Data = (FElementType*)malloc(sizeof(FElementType));
-        }
-        
-        ConsumerCursor.SetFullFence(0);
-        ProducerCursor.SetFullFence(0);
-    }
+        RingBuffer = (FElementType*)calloc(IndexMask + 1, sizeof(FElementType));
+    } 
 
     ~TMPMCQueue()
     {
@@ -277,7 +260,7 @@ public:
         }
         
         const int_fast64_t ClaimedIndex = ProducerCursor.IncrementAndGetOldValue(); // fetch_add
-        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask.load(std::memory_order_relaxed);
+        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask;
         
         /** Update the index on the ring buffer with the new element */
         *RingBuffer[ClaimedIndexMask].Data = NewElement;
@@ -339,7 +322,7 @@ public:
         /** Perform a fetch_add with acquire_release semantics */
         const int_fast64_t ClaimedIndex = ConsumerCursor.IncrementAndGetOldValue();
         /** Calculate the index, avoiding the use of modulo */
-        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask.load(std::memory_order_relaxed);
+        const int_fast64_t ClaimedIndexMask = ClaimedIndex & IndexMask;
         
         /** Store the claimed element from the ring buffer in the Output var */
         Output = *RingBuffer[ClaimedIndexMask].Data;
@@ -365,7 +348,7 @@ public:
             _mm_pause();
         }
         
-        const int_fast64_t ThisIndexMask = ClaimedIndex & IndexMask.load(std::memory_order_relaxed);
+        const int_fast64_t ThisIndexMask = ClaimedIndex & IndexMask;
         
         /** Update the index on the ring buffer with the new element */
         Output = *RingBuffer[ThisIndexMask].Data;
@@ -374,41 +357,41 @@ public:
     }
 
 private:
-    struct FBufferNode
+    
+    uint_fast64_t CeilToNearestPowerOfTwo() const
     {
-        FBufferNode() noexcept
-            : Data(nullptr)
-        {
-        }
+        uint_fast64_t NearestPower = TQueueSize;
         
-        MPMC_PADDING(Pad1);
-        FElementType* Data;
-        MPMC_PADDING(Pad2);
-    };
+        NearestPower--;
+        NearestPower |= NearestPower >> 1; // 2 bit
+        NearestPower |= NearestPower >> 2; // 4 bit
+        NearestPower |= NearestPower >> 4; // 8 bit
+        NearestPower |= NearestPower >> 8; // 16 bit
+        NearestPower |= NearestPower >> 16; // 32 bit
+        NearestPower |= NearestPower >> 32; // 64 bit
+        NearestPower++;
+
+        return NearestPower;
+    }
     
 private:
-    MPMC_PADDING(Pad1);
     /** Stores a value that MUST be one less than a power of two e.g 1023.
     * Used to calculate an index for access to the @link RingBuffer.
     */
-    std::atomic<uint_fast64_t>                  IndexMask; 
-    MPMC_PADDING(Pad2);
+    alignas(PLATFORM_CACHE_LINE_SIZE) const uint_fast64_t                         IndexMask; 
     /**
      * This is the pointer to the ring buffer which holds the queue's data.
      * This is allocated in the default constructor using calloc.
      */
-    FBufferNode*                                RingBuffer;
-    MPMC_PADDING(Pad3);
+    alignas(PLATFORM_CACHE_LINE_SIZE) FElementType*                               RingBuffer;
     /**
      * The cursor that holds the next available index on the ring buffer for Consumers.
      */
-    FCursor                                     ConsumerCursor;
-    MPMC_PADDING(Pad4);
+    alignas(PLATFORM_CACHE_LINE_SIZE) FCursor                                     ConsumerCursor;
     /**
      * The cursor that holds the next available index on the ring buffer for Producers.
      */
-    FCursor                                     ProducerCursor;
-    MPMC_PADDING(PadThai);
+    alignas(PLATFORM_CACHE_LINE_SIZE) FCursor                                     ProducerCursor;
 
     
 private:
