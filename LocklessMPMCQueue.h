@@ -1,9 +1,12 @@
-﻿#ifndef LOCKLESS_MPMC_QUEUE
+﻿// SPDX-License-Identifier: GPL-2.0-or-later
+/** Lockless Multi-Producer Multi-Consumer Queue Type.
+ * Author: Primrose Taylor
+ */
+
+#ifndef LOCKLESS_MPMC_QUEUE
 #define LOCKLESS_MPMC_QUEUE
 
 #include <atomic>
-#include <thread>
-#include <cassert> 
 
 #if defined(_MSC_VER)
     #define builtin_cpu_pause() _mm_pause();
@@ -11,11 +14,11 @@
     #define builtin_cpu_pause() __builtin_ia32_pause();
 #endif
 
-template<typename T, uint_least32_t queue_size_t>
+template<typename T, uint_least32_t QUEUE_SIZE>
 class lockless_mpmc_queue final
 {
 private:
-    static constexpr size_t cache_line_size = 64;
+    static constexpr uint_fast32_t cache_line_size = 64;
     
     struct alignas(cache_line_size) queue_data
     {
@@ -25,11 +28,12 @@ private:
         T *ring_buffer;
         uint_least8_t padding_bytes[
             cache_line_size - sizeof(uint_least32_t) -
-            sizeof(std::atomic<uint_least8_t>) - sizeof(std::atomic<uint_least8_t>) -
+            sizeof(std::atomic<uint_least32_t>) -
+            sizeof(std::atomic<uint_least32_t>) -
             sizeof(T*)
             % cache_line_size];
 
-        queue_data(const uint_least32_t initial_index_mask) noexcept
+        queue_data(const uint_least32_t initial_index_mask)
             : index_mask(initial_index_mask),
             consumer_cursor(0),
             producer_cursor(0),
@@ -40,15 +44,21 @@ private:
     };
     
 public:
-    lockless_mpmc_queue() noexcept
+    lockless_mpmc_queue()
         : data(ceil_to_nearest_power_of_two_minus_one())
     {
-        assert(data.index_mask > 0);
+        static_assert(QUEUE_SIZE > 0, "Can't have a queue of size 0!");
+        static_assert(QUEUE_SIZE <= 0xffffffff,
+            "Can't have a queue size which is above 32 bits!");
+        static_assert(std::is_copy_constructible_v<T> ||
+            std::is_copy_assignable_v<T> ||
+            std::is_move_assignable_v<T> || std::is_move_constructible_v<T>,
+            "Can't use non-copyable, non-assignable, non-movable, or non-constructible type!");
         
         data.ring_buffer = (T*)calloc(
             data.index_mask + 1, sizeof(T));
     }
-
+    
     ~lockless_mpmc_queue()
     {
         if(data.ring_buffer != nullptr)
@@ -57,114 +67,95 @@ public:
         }
     }
     
-    bool enqueue(const T& new_element)
+    bool push(const T& new_element)
     {
-        uint_fast32_t current_producer_cursor;
-        uint_fast32_t new_producer_cursor;
+        uint_least32_t current_producer_cursor;
+        uint_least32_t new_producer_cursor;
         
         do
         {
-            current_producer_cursor = data.producer_cursor.load(std::memory_order_acquire);
-            new_producer_cursor = current_producer_cursor + 1;
-            const uint_fast32_t current_consumer_cursor =
+            current_producer_cursor =
+                data.producer_cursor.load(std::memory_order_acquire);
+            const uint_least32_t current_consumer_cursor =
                 data.consumer_cursor.load(std::memory_order_acquire);
+            
+            new_producer_cursor = current_producer_cursor + 1;
 
-            if((new_producer_cursor) == current_consumer_cursor)
+            // Check if the buffer is full
+            if(new_producer_cursor == current_consumer_cursor)
             {
                 return false;
             }
-
+            
             builtin_cpu_pause();
-        } while (!data.producer_cursor.compare_exchange_weak(
-            current_producer_cursor, new_producer_cursor,
-            std::memory_order_acq_rel, std::memory_order_relaxed));
+        } while (!custom_cas(data.producer_cursor,
+            current_producer_cursor,
+             new_producer_cursor));
 
         data.ring_buffer[current_producer_cursor & data.index_mask] = new_element;
         
-        return true;
-    }
-
-    bool batch_enqueue(const T* new_elements, const uint_fast32_t size)
-    {
-        if(!new_elements || size == 0)
-        {
-            return false;
-        }
-
-        uint_fast32_t current_producer_cursor;
-        uint_fast32_t new_producer_cursor;
-        
-        do
-        {
-            current_producer_cursor = data.producer_cursor.load(std::memory_order_acquire);
-            new_producer_cursor = current_producer_cursor + size;
-            const uint_fast32_t current_consumer_cursor =
-                data.consumer_cursor.load(std::memory_order_acquire);
-
-            if(new_producer_cursor >= current_consumer_cursor)
-            {
-                return false;
-            }
-                
-            builtin_cpu_pause();
-        } while (!data.producer_cursor.compare_exchange_weak(
-            current_producer_cursor, new_producer_cursor,
-            std::memory_order_acq_rel, std::memory_order_relaxed));
-
-        for(uint_least32_t i = 0; i < size; ++i)
-        {
-            if(!new_elements[i])
-            {
-                return false; // this is awkward because some prior valid elements may have already been added
-            }
-            
-            data.ring_buffer[(current_producer_cursor + i) & data.index_mask] = new_elements[i];
-        }
-        
-        return true;
+        return true; 
     }
     
-    bool dequeue(T& element)
+    bool pop(T& element)
     {
-        uint_fast32_t current_consumer_cursor;
-        uint_fast32_t new_consumer_cursor;
-        
+        uint_least32_t current_consumer_cursor;
+        uint_least32_t new_consumer_cursor;
+
         do
         {
-            current_consumer_cursor = data.consumer_cursor.load(std::memory_order_acquire);
-            new_consumer_cursor = current_consumer_cursor + 1;
-            const uint_fast32_t current_producer_cursor =
+            current_consumer_cursor =
+                data.consumer_cursor.load(std::memory_order_acquire);
+            const uint_least32_t current_producer_cursor = 
                 data.producer_cursor.load(std::memory_order_acquire);
 
+            // Check if the buffer is empty
             if(current_consumer_cursor == current_producer_cursor)
             {
                 return false;
             }
 
+            new_consumer_cursor = current_consumer_cursor + 1;
+            
             builtin_cpu_pause();
-        } while (!data.consumer_cursor.compare_exchange_weak(
-            current_consumer_cursor, new_consumer_cursor,
-            std::memory_order_acq_rel, std::memory_order_relaxed));
+        } while (!custom_cas(data.consumer_cursor,
+            current_consumer_cursor,
+            new_consumer_cursor));
 
         element = data.ring_buffer[current_consumer_cursor & data.index_mask];
         
         return true;
     }
     
-    bool batch_dequeue()
+    uint_least32_t size() const
     {
-        return true;
+        const uint_fast32_t current_producer_cursor =
+            data.producer_cursor.load(std::memory_order_acquire);
+        const uint_fast32_t current_consumer_cursor =
+            data.consumer_cursor.load(std::memory_order_acquire);
+
+        return current_producer_cursor - current_consumer_cursor;
+    }
+
+    bool empty() const
+    {
+        return size() == 0;
+    }
+
+    bool full() const
+    {
+        return size() == (data.index_mask + 1);
     }
     
 private:
     uint_least32_t ceil_to_nearest_power_of_two_minus_one() const
     {
-        if(queue_size_t == 0)
+        if(QUEUE_SIZE == 0)
         {
             return 0;
         }
         
-        uint_least32_t nearest_power = queue_size_t;
+        uint_least32_t nearest_power = QUEUE_SIZE;
         
         nearest_power--;
         nearest_power |= nearest_power >> 1; // 2 bit
@@ -172,12 +163,32 @@ private:
         nearest_power |= nearest_power >> 4; // 8 bit
         nearest_power |= nearest_power >> 8; // 16 bit
         nearest_power |= nearest_power >> 16; // 32 bit
-
+        // nearest_power++; // skip this final step to get n^2 - 1
+        
         return nearest_power;
+    }
+
+    static bool custom_cas(std::atomic<uint_least32_t>& atomic_var,
+        const uint_least32_t expected, const uint_least32_t desired)
+    {
+        const uint_least32_t current_value =
+            atomic_var.load(std::memory_order_relaxed);
+
+        if(current_value == expected)
+        {
+            atomic_var.store(desired, std::memory_order_release);
+            return true;
+        }
+        
+        return false;
     }
     
 private:
-    alignas(cache_line_size) queue_data data;
+    queue_data data;
+
+private:
+    lockless_mpmc_queue(const lockless_mpmc_queue&) = delete;
+    lockless_mpmc_queue& operator=(const lockless_mpmc_queue&) = delete;
 };
 
 #endif
