@@ -1,194 +1,343 @@
-﻿// SPDX-License-Identifier: GPL-2.0-or-later
-/** Lockless Multi-Producer Multi-Consumer Queue Type.
+// SPDX-License-Identifier: GPL-2.0-or-later
+/**
+ * C++14 32bit Lockless Bounded Circular MPMC Queue type.
  * Author: Primrose Taylor
  */
 
-#ifndef LOCKLESS_MPMC_QUEUE
-#define LOCKLESS_MPMC_QUEUE
+#ifndef BOUNDED_CIRCULAR_MPMC_QUEUE_H
+#define BOUNDED_CIRCULAR_MPMC_QUEUE_H
+
+#include "stdio.h"
+#include "stdlib.h"
 
 #include <atomic>
+#include <stdint.h>
+#include <functional>
+#include <thread>
+
+#define CACHE_LINE_SIZE     64U
 
 #if defined(_MSC_VER)
-    #define builtin_cpu_pause() _mm_pause();
-#elif defined(__clang__) || defined(__GNUC__)
-    #define builtin_cpu_pause() __builtin_ia32_pause();
+    #define HARDWARE_PAUSE()                _mm_pause();
+    #define _ENABLE_ATOMIC_ALIGNMENT_FIX    1 // MSVC atomic alignment fix.
+    #define ATOMIC_ALIGNMENT                4
+#else
+    #define ATOMIC_ALIGNMENT                16
+    #if defined(__clang__) || defined(__GNUC__)
+        #define HARDWARE_PAUSE()            __builtin_ia32_pause();
+    #endif
 #endif
 
-template<typename T, uint_least32_t QUEUE_SIZE>
-class lockless_mpmc_queue final
+/**
+ * Lockless, Multi-Producer, Multi-Consumer, Bounded Circular Queue type.
+ * The type is intended to be light weight & portable.
+ * The sub-types are all padded to fit within cache lines. Padding may be put
+ * inbetween member variables if the variables are accessed seperatley.
+ */
+template <typename T, uint_least32_t queue_size, bool should_yield_not_pause = false>
+class bounded_circular_mpmc_queue final
 {
-private:
-    static constexpr uint_fast32_t cache_line_size = 64;
-    
-    struct alignas(cache_line_size) queue_data
+    /**
+     * Simple, efficient spin-lock implementation.
+     * A function that takes a void lambda function can be used to
+     * conveiniently do something which will be protected by the lock.
+     * @cite Credit to Erik Rigtorp https://rigtorp.se/spinlock/
+     */
+    class spin_lock
     {
-        const uint_least32_t index_mask;
-        std::atomic<uint_least32_t> consumer_cursor;
-        std::atomic<uint_least32_t> producer_cursor;
-        T *ring_buffer;
-        uint_least8_t padding_bytes[
-            cache_line_size - sizeof(uint_least32_t) -
-            sizeof(std::atomic<uint_least32_t>) -
-            sizeof(std::atomic<uint_least32_t>) -
-            sizeof(T*)
-            % cache_line_size];
+        std::atomic<bool> lock_flag;
+        
+    public:
+        spin_lock()
+            : lock_flag{false}
+        {
+        }
 
-        queue_data(const uint_least32_t initial_index_mask)
-            : index_mask(initial_index_mask),
-            consumer_cursor(0),
-            producer_cursor(0),
-            ring_buffer(nullptr),
+        void do_work_through_lock(const std::function<void()> functor)
+        {
+            lock();
+            functor();
+            unlock();
+        }
+        
+        void lock()
+        {
+            while (true)
+            {
+                if (!lock_flag.exchange(true, std::memory_order_acquire))
+                {
+                    break;
+                }
+
+                while (lock_flag.load(std::memory_order_relaxed))
+                {
+                    should_yield_not_pause ? std::this_thread::yield() : HARDWARE_PAUSE();
+                }
+            }
+        }
+
+        void unlock()
+        {
+            lock_flag.store(false, std::memory_order_release);
+        }
+    };
+
+    /**
+     * Structure that holds the two cursors.
+     * The cursors are held together because we'll only ever be accessing
+     * them both at the same time.
+     * We don't directly align the struct because we need to use it as an
+     * atomic variable, so we must align the atomic variable instead.
+     */
+    struct cursor_data
+    {
+        uint_fast32_t producer_cursor;
+        uint_fast32_t consumer_cursor;
+        uint8_t padding_bytes[CACHE_LINE_SIZE -
+            sizeof(uint_fast32_t) -
+            sizeof(uint_fast32_t)
+            % CACHE_LINE_SIZE];
+
+        cursor_data(const uint_fast32_t in_producer_cursor = 0,
+            const uint_fast32_t in_consumer_cursor = 0)
+            : producer_cursor(in_producer_cursor),
+            consumer_cursor(in_consumer_cursor),
             padding_bytes{0}
         {
         }
     };
+
+    /**
+     * Structure that represents each node in the circular buffer.
+     * Access to the data is protected by a spin lock.
+     * Contention on the spin lock should be minimal, as it's only there
+     * to prevent the case where a producer/consumer may try work with an element before
+     * someone else has finished working with it. The data and the spin lock are seperated by
+     * padding to put them in differnet cache lines, since they are not accessed
+     * together in the case mentioned previously. The problem with this is
+     * that in low contention cases, they will be accessed together, and thus
+     * should be in the same cache line.
+     */
+    struct buffer_node
+    {
+        T data;
+        uint8_t padding_bytes_0[CACHE_LINE_SIZE -
+            sizeof(T) % CACHE_LINE_SIZE];
+        spin_lock spin_lock_;
+        uint8_t padding_bytes_1[CACHE_LINE_SIZE -
+            sizeof(spin_lock)
+            % CACHE_LINE_SIZE];
+
+        buffer_node()
+            : spin_lock_(),
+            padding_bytes_0{0},
+            padding_bytes_1{0}
+        {
+        }
+
+        void get_data(T& out_data) const
+        {
+            spin_lock_.do_work_through_lock([&]()
+            {
+                out_data = data;
+            });
+        }
+
+        void set_data(const T& in_data)
+        {
+            spin_lock_.do_work_through_lock([&]()
+            {
+               data = in_data; 
+            });
+        }
+    };
+
+    /**
+     * Strucutre that contains the index mask, and the circular buffer.
+     * Both are accessed at the same time, so they are not seperated by padding.
+     */
+    struct alignas(CACHE_LINE_SIZE) circular_buffer_data
+    {
+        const uint_fast32_t index_mask;
+        buffer_node* circular_buffer;
+        uint8_t padding_bytes[CACHE_LINE_SIZE -
+            sizeof(const uint_fast32_t) -
+            sizeof(buffer_node*)
+            % CACHE_LINE_SIZE];
+
+        circular_buffer_data()
+            : index_mask(get_next_power_of_two()),
+            padding_bytes{0}
+        {
+            static_assert(queue_size > 0, "Can't have a queue size <= 0!");
+            static_assert(queue_size <= 0xffffffffU,
+                "Can't have a queue length above 32bits!");
+
+            /** Contigiously allocate the buffer.
+              * The theory behind using calloc and not aligned_alloc
+              * or equivelant, is that the memory should still be aligned,
+              * since calloc will align by the type size, which in this case
+              * is a multiple of the cache line size.
+             */
+            circular_buffer = (buffer_node*)calloc(
+                index_mask + 1, sizeof(buffer_node));
+        }
+
+        ~circular_buffer_data()
+        {
+            if(circular_buffer != nullptr)
+            {
+                free(circular_buffer);
+            }
+        }
+        
+    private:
+        /**
+         * @cite https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
+         */
+        uint_least32_t get_next_power_of_two()
+        {
+            uint_least32_t v = queue_size;
+
+            v--;
+            v |= v >> 1;
+            v |= v >> 2;
+            v |= v >> 4;
+            v |= v >> 8;
+            v |= v >> 16;
+            v++;
+            
+            return v;
+        }
+    };
     
 public:
-    lockless_mpmc_queue()
-        : data(ceil_to_nearest_power_of_two_minus_one())
+    bounded_circular_mpmc_queue()
+        : cursor_data_(cursor_data{}),
+        circular_buffer_data_()
     {
-        static_assert(QUEUE_SIZE > 0, "Can't have a queue of size 0!");
-        static_assert(QUEUE_SIZE <= 0xffffffff,
-            "Can't have a queue size which is above 32 bits!");
-        static_assert(std::is_copy_constructible_v<T> ||
-            std::is_copy_assignable_v<T> ||
-            std::is_move_assignable_v<T> || std::is_move_constructible_v<T>,
-            "Can't use non-copyable, non-assignable, non-movable, or non-constructible type!");
-        
-        data.ring_buffer = (T*)calloc(
-            data.index_mask + 1, sizeof(T));
     }
-    
-    ~lockless_mpmc_queue()
+
+    /**
+     * Push an element into the queue.
+     * 
+     * @param in_data Reference to the variable containg the data to be pushed.
+     * @returns Returns false only if the buffer is full.
+     */
+    bool push(const T& in_data)
     {
-        if(data.ring_buffer != nullptr)
+        cursor_data current_cursor_data;
+
+        // An infinite while-loop is used instead of a do-while, to avoid
+        // the yield/pause happening before the CAS operation.
+        while(true)
         {
-            free(data.ring_buffer);
+            current_cursor_data = cursor_data_.load(std::memory_order_acquire);
+
+            // Check if the buffer is full..
+            if (current_cursor_data.producer_cursor + 1 == current_cursor_data.consumer_cursor)
+            {
+                return false;
+            }
+
+            // CAS operation used to make sure the cursors have not been incremented
+            // by another producer/consumer before we got to this point, and to then increment
+            // the cursor by 1 if it hasn't been changed.
+            if (cursor_data_.compare_exchange_weak(current_cursor_data,
+            {current_cursor_data.producer_cursor + 1,
+                current_cursor_data.consumer_cursor},
+            std::memory_order_release, std::memory_order_relaxed))
+            {
+                break;
+            }
+
+            should_yield_not_pause ? std::this_thread::yield() : HARDWARE_PAUSE();
         }
-    }
-    
-    bool push(const T& new_element)
-    {
-        uint_least32_t current_producer_cursor;
-        uint_least32_t new_producer_cursor;
+
+        // Set the data
+        circular_buffer_data_.circular_buffer[
+            current_cursor_data.producer_cursor & circular_buffer_data_.index_mask
+            ].set_data(in_data);
         
-        do
-        {
-            current_producer_cursor =
-                data.producer_cursor.load(std::memory_order_acquire);
-            const uint_least32_t current_consumer_cursor =
-                data.consumer_cursor.load(std::memory_order_acquire);
-            
-            new_producer_cursor = current_producer_cursor + 1;
-
-            // Check if the buffer is full
-            if(new_producer_cursor == current_consumer_cursor)
-            {
-                return false;
-            }
-            
-            builtin_cpu_pause();
-        } while (!custom_cas(data.producer_cursor,
-            current_producer_cursor,
-             new_producer_cursor));
-
-        data.ring_buffer[current_producer_cursor & data.index_mask] = new_element;
-        
-        return true; 
+        return true;
     }
-    
-    bool pop(T& element)
+
+    /**
+     * Pop an element from the queue.
+     * 
+     * @param out_data Reference to the variable that will store the popped element.
+     * @returns Returns false only if the buffer is empty.
+     */
+    bool pop(T& out_data)
     {
-        uint_least32_t current_consumer_cursor;
-        uint_least32_t new_consumer_cursor;
+        cursor_data current_cursor_data;
 
-        do
+        while(true)
         {
-            current_consumer_cursor =
-                data.consumer_cursor.load(std::memory_order_acquire);
-            const uint_least32_t current_producer_cursor = 
-                data.producer_cursor.load(std::memory_order_acquire);
+            current_cursor_data = cursor_data_.load(std::memory_order_acquire);
 
-            // Check if the buffer is empty
-            if(current_consumer_cursor == current_producer_cursor)
+            // empty check 
+            if (current_cursor_data.consumer_cursor == current_cursor_data.producer_cursor)
             {
                 return false;
             }
 
-            new_consumer_cursor = current_consumer_cursor + 1;
+            if (cursor_data_.compare_exchange_weak(current_cursor_data,
+            {current_cursor_data.producer_cursor,
+                current_cursor_data.consumer_cursor + 1},
+                std::memory_order_release, std::memory_order_relaxed))
+            {
+                break;
+            }
             
-            builtin_cpu_pause();
-        } while (!custom_cas(data.consumer_cursor,
-            current_consumer_cursor,
-            new_consumer_cursor));
+            should_yield_not_pause ? std::this_thread::yield() : HARDWARE_PAUSE();
+        }
 
-        element = data.ring_buffer[current_consumer_cursor & data.index_mask];
+        // get the data
+        circular_buffer_data_.circular_buffer[
+            current_cursor_data.consumer_cursor & circular_buffer_data_.index_mask
+            ].get_data(out_data);
         
         return true;
     }
     
-    uint_least32_t size() const
+    /**
+     * @note Calling this function will increase contention on the cursor data!
+     * @returns How many elements are currently in the buffer.
+     */
+    uint_fast32_t size() const
     {
-        const uint_fast32_t current_producer_cursor =
-            data.producer_cursor.load(std::memory_order_acquire);
-        const uint_fast32_t current_consumer_cursor =
-            data.consumer_cursor.load(std::memory_order_acquire);
-
-        return current_producer_cursor - current_consumer_cursor;
+        const cursor_data cursors = cursor_data_.load(std::memory_order_acquire);
+        return cursors.producer_cursor - cursors.consumer_cursor;
     }
 
+    /**
+     * @note Calling this function will increase contention on the cursor data!
+     * @returns Whether or not the buffer is empty.
+     */
     bool empty() const
     {
         return size() == 0;
     }
 
+    /**
+     * @note Calling this function will increase contention on the cursor data!
+     * @returns Whether or not the buffer is full.
+     */
     bool full() const
     {
-        return size() == (data.index_mask + 1);
+        return size() == circular_buffer_data_.index_mask + 1;
     }
     
 private:
-    uint_least32_t ceil_to_nearest_power_of_two_minus_one() const
-    {
-        if(QUEUE_SIZE == 0)
-        {
-            return 0;
-        }
-        
-        uint_least32_t nearest_power = QUEUE_SIZE;
-        
-        nearest_power--;
-        nearest_power |= nearest_power >> 1; // 2 bit
-        nearest_power |= nearest_power >> 2; // 4 bit
-        nearest_power |= nearest_power >> 4; // 8 bit
-        nearest_power |= nearest_power >> 8; // 16 bit
-        nearest_power |= nearest_power >> 16; // 32 bit
-        // nearest_power++; // skip this final step to get n^2 - 1
-        
-        return nearest_power;
-    }
-
-    static bool custom_cas(std::atomic<uint_least32_t>& atomic_var,
-        const uint_least32_t expected, const uint_least32_t desired)
-    {
-        const uint_least32_t current_value =
-            atomic_var.load(std::memory_order_relaxed);
-
-        if(current_value == expected)
-        {
-            atomic_var.store(desired, std::memory_order_release);
-            return true;
-        }
-        
-        return false;
-    }
+    alignas(CACHE_LINE_SIZE) std::atomic<cursor_data> cursor_data_;
+    circular_buffer_data circular_buffer_data_;
     
 private:
-    queue_data data;
-
-private:
-    lockless_mpmc_queue(const lockless_mpmc_queue&) = delete;
-    lockless_mpmc_queue& operator=(const lockless_mpmc_queue&) = delete;
+    bounded_circular_mpmc_queue(
+        const bounded_circular_mpmc_queue&) = delete;
+    bounded_circular_mpmc_queue& operator=(
+        const bounded_circular_mpmc_queue&) = delete;
 };
 
 #endif
